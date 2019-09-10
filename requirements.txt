@@ -1,0 +1,7 @@
+numpy==1.17.0
+matplotlib==3.1.1
+opencv-python==4.1.0.25
+https://download.pytorch.org/whl/cu100/torch-1.1.0-cp36-cp36m-linux_x86_64.whl
+https://download.pytorch.org/whl/cu100/torchvision-0.3.0-cp36-cp36m-linux_x86_64.whl
+torchsummary==1.5.1
+Pillow==6.1.0
