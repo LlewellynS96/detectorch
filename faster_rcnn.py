@@ -10,7 +10,7 @@ import torch.optim as optim
 import numpy as np
 from torchvision import datasets, models, transforms
 import matplotlib.pyplot as plt
-from backbone import FeatureExtractor
+from detectron import FastRCNN, RPN
 
 
 def main():
@@ -19,10 +19,11 @@ def main():
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    model = FeatureExtractor(pretrained=True)
-    model.to(device)
+    backbone = FastRCNN(pretrained=True)
+    backbone.to(device)
 
-    torchsummary.summary(model, (3, 224, 224))
+    torchsummary.summary(backbone.features, (3, 224, 224))
+    torchsummary.summary(backbone.classifier, (1, 25088))
 
 
 if __name__ == '__main__':
