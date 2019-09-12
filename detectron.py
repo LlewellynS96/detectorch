@@ -67,7 +67,7 @@ class RPN(nn.Module):
         cls = nn.Conv2d(in_channels=self.num_features,
                         out_channels=2 * self.num_anchors,
                         kernel_size=1)(features)
-        cls = nn.Softmax(cls, dim=1)
+        cls = torch.softmax(cls, dim=1)
         reg = nn.Conv2d(in_channels=self.num_features,
                         out_channels=4 * self.num_anchors,
                         kernel_size=1)(features)
