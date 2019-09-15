@@ -3,6 +3,7 @@ import torch
 import numpy as np
 from torch.utils.data import Dataset
 import torchvision.transforms
+from utils import VGG_MEAN, VGG_STD
 from utils import read_classes, get_annotations
 from PIL import Image
 
@@ -41,10 +42,11 @@ class PascalDatasetImage(Dataset):
                 be returned.
         """
         self.classes = read_classes(classes)
+        self.classes.insert(0, '__background__')
 
-        assert set(self.classes).issubset({'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat',
-                                           'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike', 'person',
-                                           'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor'})
+        assert set(self.classes).issubset({'__background__', 'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus',
+                                           'car', 'cat', 'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike',
+                                           'person', 'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor'})
 
         assert dataset in ['train', 'val', 'trainval', 'test']
 
@@ -59,11 +61,12 @@ class PascalDatasetImage(Dataset):
         self.images = []
         self.skip_truncated = skip_truncated
         self.skip_difficult = skip_difficult
-        self.image_size = image_size
+        self.default_image_size = image_size
+        self.image_size = self.default_image_size
 
         self.do_transforms = do_transforms
 
-        for cls in self.classes:
+        for cls in self.classes[1:]:
             file = os.path.join(self.sets_dir, '{}_{}.txt'.format(cls, dataset))
             with open(file) as f:
                 for line in f:
@@ -129,6 +132,7 @@ class PascalDatasetImage(Dataset):
             image = image.resize(self.image_size)
 
         image = torchvision.transforms.ToTensor()(image)
+        image = torchvision.transforms.Normalize(mean=VGG_MEAN, std=VGG_STD)(image)
 
         return image, image_info, image_transforms
 
@@ -148,6 +152,9 @@ class PascalDatasetImage(Dataset):
 
     def set_image_size(self, x, y):
         self.image_size = x, y
+
+    def reset_image_size(self):
+        self.image_size = self.default_image_size
 
     def get_gt_bboxes(self, image_info, image_transforms):
         annotations = get_annotations(self.annotations_dir, image_info['id'])
@@ -177,10 +184,11 @@ class PascalDatasetImage(Dataset):
             xmax = np.clip(xmax, a_min=0, a_max=1.)
             ymin = np.clip(ymin, a_min=0, a_max=1.)
             ymax = np.clip(ymax, a_min=0, a_max=1.)
-            bboxes.append([xmin, ymin, xmax, ymax])
-            classes.append(self.encode_categorical(name))
+            if (xmax - xmin) > 0 and (ymax - ymin) > 0:
+                bboxes.append([xmin, ymin, xmax, ymax])
+                classes.append(self.encode_categorical(name))
 
-        bboxes = torch.tensor(bboxes)
-        classes = torch.tensor(classes)
+        bboxes = torch.tensor(bboxes, dtype=torch.float)
+        classes = torch.tensor(classes, dtype=torch.float)
 
         return bboxes, classes

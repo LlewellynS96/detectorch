@@ -5,6 +5,11 @@ import xml.etree.ElementTree as Et
 import torch
 
 
+NUM_WORKERS = 0
+VGG_MEAN = [0.485, 0.456, 0.406]
+VGG_STD = [0.229, 0.224, 0.225]
+
+
 def read_classes(file):
     """
     Utility function that parses a text file containing all the classes
@@ -72,6 +77,7 @@ def to_numpy_image(image, size):
         A ndarray representation of the image.
     """
     image = image.permute(1, 2, 0).cpu().numpy()
+    image += VGG_MEAN
     image *= 255.
     image = image.astype(dtype=np.uint8)
     image = cv2.resize(image, dsize=size, interpolation=cv2.INTER_CUBIC)
@@ -122,6 +128,160 @@ def add_bbox_to_image(image, bbox, confidence, cls):
     cv2.putText(image, text, (xmin, ymax), cv2.FONT_HERSHEY_SIMPLEX, 0.75, [255] * 3, 1)
 
 
+def jaccard(boxes_a, boxes_b):
+    """
+    Calculate the Intersection of Unions (IoUs) between bounding boxes.
+    IoU is calculated as a ratio of area of the intersection
+    and area of the union.
+    Parameters
+    ----------
+        boxes_a : Tensor
+            An array whose shape is :math:`(N, 4)`. :math:`N` is the number
+            of bounding boxes. The dtype should be :obj:`float`.
+        boxes_b : Tensor
+            An array similar to :obj:`bbox_a`, whose shape is :math:`(K, 4)`.
+            The dtype should be :obj:`float`.
+    Returns
+    -------
+        Tensor
+            An array whose shape is :math:`(N, K)`. An element at index :math:`(n, k)`
+            contains IoUs between :math:`n` th bounding box in :obj:`bbox_a` and
+            :math:`k` th bounding box in :obj:`bbox_b`.
+    Notes
+    -----
+        from: https://github.com/chainer/chainercv
+    """
+    assert boxes_a.shape[1] == 4
+    assert boxes_b.shape[1] == 4
+    assert isinstance(boxes_a, torch.Tensor)
+    assert isinstance(boxes_b, torch.Tensor)
+
+    tl = torch.max(boxes_a[:, None, :2], boxes_b[:, :2])
+    br = torch.min(boxes_a[:, None, 2:], boxes_b[:, 2:])
+
+    area_a = torch.prod(boxes_a[:, 2:] - boxes_a[:, :2], 1)
+    area_b = torch.prod(boxes_b[:, 2:] - boxes_b[:, :2], 1)
+
+    en = (tl < br).type(tl.type()).prod(dim=2)
+    area_i = torch.prod(br - tl, 2) * en
+
+    area_a = torch.clamp(area_a, min=0)
+
+    ious = area_i / (area_a[:, None] + area_b - area_i)
+
+    return ious
+
+
 def index_dict_list(dictionary, index):
 
     return {k: v[index] for k,v in dictionary.items() if isinstance(v, (list, torch.Tensor))}
+
+
+def random_choice(x, size):
+
+    idx = torch.multinomial(torch.ones(x.numel()), size, replacement=False)
+
+    return x[idx].squeeze()
+
+
+def xyxy2xywh(xyxy):
+    """
+    Utility function that converts bounding boxes that are in the form
+    (x1, y1, x2, y2) to (x_c, y_c, w, h).
+    Parameters
+    ----------
+    xyxy : Tensor
+        A tensor whose shape is :math:`(N, 4)` where the elements in the
+        0th and 1st column represent the x and y coordinates of the top left
+        corner of the bounding box and the 2nd and 3rd column represent the
+        x and y coordinates of the bottom right corner of the bounding box.
+    Returns
+    -------
+    xywh : Tensor
+        A tensor whose shape is :math:`(N, 4)` where the elements in the
+        0th and 1st column represent the x and y coordinates of the center
+        of the bounding box and the 2nd and 3rd column represent the
+        width and height of the bounding box.
+    """
+    xywh = torch.zeros_like(xyxy)
+    xywh[:, :2] = (xyxy[:, :2] + xyxy[:, 2:]) / 2.
+    xywh[:, 2:] = xyxy[:, 2:] - xyxy[:, :2]
+
+    return xywh
+
+
+def xywh2xyxy(xywh):
+    """
+    Converts bounding boxes that are in the form
+    (x_c, y_c, w, h) to (x1, y1, x2, y2).
+    Parameters
+    ----------
+    xywh : Tensor
+        A tensor whose shape is :math:`(N, 4)` where the elements in the
+        0th and 1st column represent the x and y coordinates of the center
+        of the bounding box and the 2nd and 3rd column represent the
+        width and height of the bounding box.
+
+    Returns
+    -------
+    xyxy : Tensor
+        A tensor whose shape is :math:`(N, 4)` where the elements in the
+        0th and 1st column represent the x and y coordinates of the top left
+        corner of the bounding box and the 2nd and 3rd column represent the
+        x and y coordinates of the bottom right corner of the bounding box.
+    """
+    xyxy = torch.zeros_like(xywh)
+    half = xywh[:, 2:] / 2.
+    xyxy[:, :2] = xywh[:, :2] - half
+    xyxy[:, 2:] = xywh[:, :2] + half
+
+    return xyxy
+
+
+def parameterize_bboxes(bboxes, anchors):
+
+    assert bboxes.shape == anchors.shape
+    assert bboxes.shape[-1] == 4
+
+    bboxes_xywh = xyxy2xywh(bboxes)
+    anchors_xywh = xyxy2xywh(anchors)
+
+    bboxes_xywh[:, :2] = (bboxes_xywh[:, :2] - anchors_xywh[:, :2]) / anchors_xywh[:, 2:]
+    bboxes_xywh[:, 2:] = torch.log(bboxes_xywh[:, 2:] / anchors_xywh[:, 2:])
+
+    return bboxes_xywh
+
+
+def deparameterize_bboxes(reg, anchors):
+
+    assert reg.shape == anchors.shape
+    assert anchors.shape[-1] == 4
+
+    anchors_xywh = xyxy2xywh(anchors)
+    bboxes_xywh = torch.zeros_like(anchors)
+
+    bboxes_xywh[:, :2] = reg[:, :2] * anchors_xywh[:, 2:] + anchors_xywh[:, :2]
+    bboxes_xywh[:, 2:] = torch.exp(reg[:, 2:]) * anchors_xywh[:, 2:]
+
+    bboxes_xyxy = xywh2xyxy(bboxes_xywh)
+
+    bboxes_xyxy = torch.clamp(bboxes_xyxy, min=0., max=1.)
+
+    return bboxes_xyxy
+
+
+def get_trainable_parameters(module):
+    """
+    Returns a list of a model's trainable parameters by checking which
+    parameters are tracking their gradients.
+    Returns
+    -------
+    list
+        A list containing the trainable parameters.
+    """
+    trainable_parameters = []
+    for param in module.parameters():
+        if param.requires_grad:
+            trainable_parameters.append(param)
+
+    return trainable_parameters
