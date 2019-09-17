@@ -29,7 +29,7 @@ class FocalLoss(nn.Module):
         pt = torch.exp(-bce_loss)
         f_loss = self.alpha * (1 - pt)**self.gamma * bce_loss
 
-        if self.reduction is None:
+        if self.reduction is None or self.reduction == 'none':
             return f_loss
         elif self.reduction == 'mean':
             return torch.mean(f_loss)

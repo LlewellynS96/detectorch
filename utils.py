@@ -60,7 +60,7 @@ def get_annotations(annotations_dir, img):
     return annotations
 
 
-def to_numpy_image(image, size):
+def to_numpy_image(image, size, normalize=True):
     """
     A utility function that converts a Tensor in the range [0., 1.] to a
     resized ndarray in the range [0, 255].
@@ -70,14 +70,19 @@ def to_numpy_image(image, size):
         A Tensor representing the image.
     size : tuple of int
         The size (w, h) to which the image should be resized.
-
+    normalize : bool
+        A flag which indicates whether the image was orignially normalized,
+        which means that it should be de-normalized when converting to an
+        array.
     Returns
     -------
     image : ndarray
         A ndarray representation of the image.
     """
     image = image.permute(1, 2, 0).cpu().numpy()
-    image += VGG_MEAN
+    if normalize:
+        image *= VGG_STD
+        image += VGG_MEAN
     image *= 255.
     image = image.astype(dtype=np.uint8)
     image = cv2.resize(image, dsize=size, interpolation=cv2.INTER_CUBIC)
@@ -151,8 +156,8 @@ def jaccard(boxes_a, boxes_b):
     -----
         from: https://github.com/chainer/chainercv
     """
-    assert boxes_a.shape[1] == 4
-    assert boxes_b.shape[1] == 4
+    assert boxes_a.shape[-1] == 4
+    assert boxes_b.shape[-1] == 4
     assert isinstance(boxes_a, torch.Tensor)
     assert isinstance(boxes_b, torch.Tensor)
 
@@ -285,3 +290,69 @@ def get_trainable_parameters(module):
             trainable_parameters.append(param)
 
     return trainable_parameters
+
+
+# Original author: Francisco Massa:
+# https://github.com/fmassa/object-detection.torch
+# Ported to PyTorch by Max deGroot (02/01/2017)
+def non_maximum_suppression(boxes, scores, overlap=0.5, top_k=101):
+    """Apply non-maximum suppression at test time to avoid detecting too many
+    overlapping bounding boxes for a given object.
+    Args:
+        boxes: (tensor) The predictions for the image, Shape: [predictions, 4].
+        scores: (tensor) The class scores for the image, Shape:[num_priors].
+        overlap: (float) The overlap threshold for suppressing unnecessary boxes.
+        top_k: (int) The maximum number of predictions to consider.
+    Return:
+        The indices of the kept boxes with respect to num_priors.
+    """
+    keep = scores.new(scores.size(0)).zero_().long()
+    if boxes.numel() == 0:
+        return keep
+    x1 = boxes[:, 0]
+    y1 = boxes[:, 1]
+    x2 = boxes[:, 2]
+    y2 = boxes[:, 3]
+    area = torch.mul(x2 - x1, y2 - y1)
+    v, idx = scores.sort(0)  # sort in ascending order
+    idx = idx[-top_k:]  # indices of the top-k largest vals
+    xx1 = boxes.new()
+    yy1 = boxes.new()
+    xx2 = boxes.new()
+    yy2 = boxes.new()
+    w = boxes.new()
+    h = boxes.new()
+
+    count = 0
+    while idx.numel() > 0:
+        i = idx[-1]  # index of current largest val
+        keep[count] = i
+        count += 1
+        if idx.size(0) == 1:
+            break
+        idx = idx[:-1]  # remove kept element from view
+        # load bboxes of next highest vals
+        torch.index_select(x1, 0, idx, out=xx1)
+        torch.index_select(y1, 0, idx, out=yy1)
+        torch.index_select(x2, 0, idx, out=xx2)
+        torch.index_select(y2, 0, idx, out=yy2)
+        # store element-wise max with next highest score
+        xx1 = torch.clamp(xx1, min=x1[i])
+        yy1 = torch.clamp(yy1, min=y1[i])
+        xx2 = torch.clamp(xx2, max=x2[i])
+        yy2 = torch.clamp(yy2, max=y2[i])
+        w.resize_as_(xx2)
+        h.resize_as_(yy2)
+        w = xx2 - xx1
+        h = yy2 - yy1
+        # check sizes of xx1 and xx2.. after each iteration
+        w = torch.clamp(w, min=0.0)
+        h = torch.clamp(h, min=0.0)
+        inter = w * h
+        rem_areas = torch.index_select(area, 0, idx)  # load remaining areas)
+        union = (rem_areas - inter) + area[i]
+        iou = inter / union  # store result in iou
+        # keep only elements with an IoU <= overlap
+        idx = idx[iou.le(overlap)]
+
+    return keep[:count].clone()

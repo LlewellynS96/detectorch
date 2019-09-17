@@ -132,6 +132,8 @@ class PascalDatasetImage(Dataset):
             image = image.resize(self.image_size)
 
         image = torchvision.transforms.ToTensor()(image)
+        # ============================= NORMALIZATION =============================
+        # Include for VGG models / Exclude for pretrained Faster R-CNN models.
         image = torchvision.transforms.Normalize(mean=VGG_MEAN, std=VGG_STD)(image)
 
         return image, image_info, image_transforms

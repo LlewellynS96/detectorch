@@ -2,6 +2,7 @@ import torch
 import torchvision
 import pickle
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 import numpy as np
 from torchvision import models, ops
@@ -13,14 +14,14 @@ from layers import FocalLoss
 
 # ========= DEBUGGING =========
 import matplotlib.pyplot as plt
-from utils import to_numpy_image
+from utils import to_numpy_image, add_bbox_to_image
 
 NETWORK_STRIDE = 16
-RPN_HI_THRESHOLD = 0.5
-RPN_LO_THRESHOLD = 0.1
+RPN_HI_THRESHOLD = 0.7
+RPN_LO_THRESHOLD = 0.3
 RPN_POS_RATIO = 0.5
 RPN_NMS_THRESHOLD = 0.7
-N = 10
+N = 5
 
 
 class FastRCNN(nn.Module):
@@ -69,17 +70,15 @@ class RPN(nn.Module):
 
         super(RPN, self).__init__()
         self.in_channels = 512
-        self.num_features = 256
+        self.num_features = 512
         self.device = device
         self.anchors = torch.tensor(anchors, device=self.device, dtype=torch.float) / NETWORK_STRIDE
         self.num_anchors = len(anchors)
-        self.windows = nn.Sequential(nn.Conv2d(in_channels=self.in_channels,
-                                               out_channels=self.num_features,
-                                               kernel_size=3,
-                                               stride=1,
-                                               padding=1),
-                                     nn.ReLU()
-                                     )
+        self.windows = nn.Conv2d(in_channels=self.in_channels,
+                                 out_channels=self.num_features,
+                                 kernel_size=3,
+                                 stride=1,
+                                 padding=1)
         self.cls = nn.Conv2d(in_channels=self.num_features,
                              out_channels=2 * self.num_anchors,
                              kernel_size=1)
@@ -88,7 +87,7 @@ class RPN(nn.Module):
                              kernel_size=1)
 
     def forward(self, x, gt_bboxes=None, batch_size=256):
-        features = self.windows(x)
+        features = F.relu(self.windows(x))
         cls = self.cls(features)
         reg = self.reg(features)
 
@@ -99,29 +98,34 @@ class RPN(nn.Module):
         grid_size = torch.tensor(features.shape[-2:], device=self.device)
         anchors = self.construct_anchors(grid_size)
         if gt_bboxes is not None:
-            with torch.no_grad():
-                anchors = self.validate_anchors(anchors)
-                ious = jaccard(anchors, gt_bboxes)
-                max_iou, argmax_iou = torch.max(ious, dim=1)
-                positive_mask = max_iou > RPN_HI_THRESHOLD
-                abs_max_iou = torch.argmax(ious, dim=0)
-                positive_mask[abs_max_iou] = 1
-                positive_mask = torch.nonzero(positive_mask)
-                negative_mask = torch.nonzero(max_iou < RPN_LO_THRESHOLD)
-                target_anchors = random_choice(negative_mask, batch_size)
-                rpn_pos_numel = int(batch_size * RPN_POS_RATIO)
-                if positive_mask.numel() < rpn_pos_numel:
-                    rpn_pos_numel = positive_mask.numel()
-                target_anchors[:rpn_pos_numel] = random_choice(positive_mask, rpn_pos_numel)
-                target_cls = torch.zeros(batch_size, 2, device=self.device)
-                target_cls[:rpn_pos_numel, 0] = 1
-                target_cls[rpn_pos_numel:, 1] = 1
-                gt_bboxes = gt_bboxes[argmax_iou][target_anchors]
-                target_reg = parameterize_bboxes(gt_bboxes, anchors[target_anchors])
-
-            return cls[target_anchors], reg[target_anchors], target_cls, target_reg
+            keep = self.validate_anchors(anchors)
+            cls = cls[keep]
+            reg = reg[keep]
+            anchors = anchors[keep]
+            ious = jaccard(anchors, gt_bboxes)
+            max_iou, argmax_iou = torch.max(ious, dim=1)
+            positive_mask = max_iou > RPN_HI_THRESHOLD
+            abs_max_iou = torch.argmax(ious, dim=0)
+            positive_mask[abs_max_iou] = 1
+            positive_mask = torch.nonzero(positive_mask)
+            negative_mask = torch.nonzero(max_iou < RPN_LO_THRESHOLD)
+            target_anchors = random_choice(negative_mask, batch_size)
+            rpn_pos_numel = int(batch_size * RPN_POS_RATIO)
+            if positive_mask.numel() < rpn_pos_numel:
+                rpn_pos_numel = positive_mask.numel()
+            target_anchors[:rpn_pos_numel] = random_choice(positive_mask, rpn_pos_numel)
+            target_cls = torch.zeros(batch_size, 2, device=self.device)
+            target_cls[:rpn_pos_numel, 0] = 1
+            target_cls[rpn_pos_numel:, 1] = 1
+            gt_bboxes = gt_bboxes[argmax_iou][target_anchors]
+            target_reg = parameterize_bboxes(gt_bboxes, anchors[target_anchors])
+            return (cls[target_anchors],
+                    reg[target_anchors],
+                    target_cls,
+                    target_reg,
+                    anchors[target_anchors])
         else:
-            reg = deparameterize_bboxes(reg, anchors)
+            reg = deparameterize_bboxes(reg.detach(), anchors)
             scores = cls[:, 0]
             keep = torchvision.ops.nms(reg, scores, RPN_NMS_THRESHOLD)
             return cls[keep][:N], reg[keep][:N]
@@ -160,12 +164,11 @@ class RPN(nn.Module):
         anchors[out_of_bounds] = -1
         out_of_bounds = torch.nonzero(anchors[:, 3] > 1)
         anchors[out_of_bounds] = -1
-        in_bounds = torch.nonzero(anchors[:, 0] >= 0)
-        anchors = anchors[in_bounds].squeeze().clone()
+        keep = torch.nonzero(anchors[:, 0] >= 0)
 
-        return anchors
+        return keep.squeeze()
 
-    def fit(self, train_data, feature_extractor, optimizer, batch_size=128, epochs=1,
+    def fit(self, train_data, feature_extractor, optimizer, batch_size=64, epochs=1,
             val_data=None, shuffle=True, multi_scale=True, checkpoint_frequency=100):
 
         self.train()
@@ -181,7 +184,7 @@ class RPN(nn.Module):
         for epoch in range(1, epochs + 1):
             image_loss = []
             if multi_scale:
-                random_size = np.random.randint(45, 60) * NETWORK_STRIDE
+                random_size = np.random.randint(49, 52) * NETWORK_STRIDE
                 train_data.set_image_size(random_size, random_size)
             with tqdm(total=len(train_dataloader),
                       desc='Epoch: [{}/{}]'.format(epoch, epochs),
@@ -193,14 +196,22 @@ class RPN(nn.Module):
                     image_transforms_ = index_dict_list(image_transforms, 0)
                     target_bboxes, _ = train_data.get_gt_bboxes(image_info_, image_transforms_)
                     target_bboxes = target_bboxes.to(self.device)
-                    optimizer.zero_grad()
-                    features = feature_extractor(image)
-                    cls, reg, target_cls, target_reg = self(features, target_bboxes, batch_size)
-                    loss = self.loss(cls, reg, target_cls, target_reg)
-                    image_loss.append(loss['total'].item())
-                    loss['total'].backward()
-                    optimizer.step()
-                    inner.set_postfix_str(' Training Loss: {:.6f}'.format(np.mean(image_loss)))
+                    if target_bboxes.numel() > 0:
+                        optimizer.zero_grad()
+                        features = feature_extractor(image)
+                        cls, reg, target_cls, target_reg, _ = self(features, target_bboxes, batch_size)
+                        # img = to_numpy_image(image[0], (800, 800))
+                        # for i in range(len(_)):
+                        #     add_bbox_to_image(img, deparameterize_bboxes(target_reg, _)[i], 1, 'target')
+                        # for i in range(torch.sum(target_cls).int()):
+                        #     add_bbox_to_image(img, _[i], 1, 'anchor')
+                        # plt.imshow(img)
+                        # plt.show()
+                        loss = self.loss(cls, reg, target_cls, target_reg)
+                        image_loss.append(loss['total'].item())
+                        loss['total'].backward()
+                        optimizer.step()
+                        inner.set_postfix_str(' Training Loss: {:.6f}'.format(np.mean(image_loss)))
                     inner.update()
                 train_loss.append(np.mean(image_loss))
                 if val_data is not None:
@@ -214,9 +225,8 @@ class RPN(nn.Module):
         return train_loss, val_loss
 
     @staticmethod
-    def loss(cls, reg, target_cls, target_reg, focal=True):
+    def loss(cls, reg, target_cls, target_reg, focal=False):
 
-        lambd = 10.
         loss = dict()
 
         if focal:
@@ -224,11 +234,11 @@ class RPN(nn.Module):
         else:
             loss['cls'] = nn.BCELoss(reduction='mean')(cls, target_cls)
 
-        obj_mask = torch.nonzero(torch.argmax(target_cls, dim=-1) == 0).squeeze()
-        loss['reg'] = lambd * nn.SmoothL1Loss(reduction='mean')(reg[obj_mask], target_reg[obj_mask])
+        obj_mask = torch.nonzero(target_cls[:, 0])
+        lambd = 1. / cls.shape[0]
+        loss['reg'] = lambd * nn.SmoothL1Loss(reduction='sum')(reg[obj_mask].squeeze(), target_reg[obj_mask].squeeze())
 
         loss['total'] = loss['cls'] + loss['reg']
-
         return loss
 
     def calculate_loss(self, data, feature_extractor, batch_size=256, fraction=0.05):
@@ -270,7 +280,7 @@ class RPN(nn.Module):
                 target_bboxes, _ = data.get_gt_bboxes(image_info_, image_transforms_)
                 target_bboxes = target_bboxes.to(self.device)
                 features = feature_extractor(image)
-                cls, reg, target_cls, target_reg = self(features, target_bboxes, batch_size)
+                cls, reg, target_cls, target_reg, _ = self(features, target_bboxes, batch_size)
                 loss = self.loss(cls, reg, target_cls, target_reg)
                 losses.append(loss['total'].item())
                 if i > len(val_dataloader) * fraction:
@@ -309,7 +319,7 @@ class FasterRCNN(nn.Module):
 
         pass
 
-    def fit(self, train_data, optimizer, batch_size=128, epochs=1,
+    def fit(self, train_data, optimizer, batch_size=64, epochs=1,
             val_data=None, shuffle=True, multi_scale=True, checkpoint_frequency=1, stage=0):
 
         self.train()
@@ -318,17 +328,19 @@ class FasterRCNN(nn.Module):
 
             self.fast_rcnn.train()
 
-            train_loss, val_loss = self.rpn.fit(train_data=train_data,
-                                                feature_extractor=self.fast_rcnn.features,
-                                                optimizer=optimizer,
-                                                batch_size=batch_size,
-                                                epochs=epochs,
-                                                val_data=val_data,
-                                                shuffle=shuffle,
-                                                multi_scale=multi_scale,
-                                                checkpoint_frequency=checkpoint_frequency)
+            for epoch in range(epochs):
 
-            self.save_model(self.name + '_{}.pkl'.format('debug'))
+                train_loss, val_loss = self.rpn.fit(train_data=train_data,
+                                                    feature_extractor=self.fast_rcnn.features,
+                                                    optimizer=optimizer,
+                                                    batch_size=batch_size,
+                                                    epochs=1,
+                                                    val_data=val_data,
+                                                    shuffle=shuffle,
+                                                    multi_scale=multi_scale,
+                                                    checkpoint_frequency=checkpoint_frequency)
+
+                self.save_model(self.name + '_{}.pkl'.format('debug'))
 
             return train_loss, val_loss
 

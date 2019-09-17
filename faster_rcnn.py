@@ -10,6 +10,7 @@ from utils import to_numpy_image, add_bbox_to_image, index_dict_list
 from utils import NUM_WORKERS
 import torchvision
 
+
 def main():
     torch.random.manual_seed(12345)
     np.random.seed(12345)
@@ -20,30 +21,32 @@ def main():
     display_rois = True
     train = True
 
-    # faster_rcnn = FasterRCNN(anchors=[[45, 90], [64, 64], [90, 45],
-    #                                   [90, 180], [128, 128], [180, 90],
-    #                                   [180, 360], [256, 256], [360, 180],
-    #                                   [360, 720], [512, 512], [720, 360]],
-    #                          device=device)
-    faster_rcnn = FasterRCNN(anchors=[[233.1948, 570.4430],
-                                      [103.9305, 419.0243],
-                                      [402.4835, 463.7479],
-                                      [109.3014,  86.1630],
-                                      [116.5302, 208.1511],
-                                      [ 35.6231,  59.8994],
-                                      [ 55.4458, 164.8338],
-                                      [670.7411, 365.8787],
-                                      [316.4950, 320.4709],
-                                      [181.8652, 330.0643],
-                                      [652.4779, 551.9171],
-                                      [238.8630, 162.8389],
-                                      [713.4675, 740.7275],
-                                      [541.8674, 221.0484],
-                                      [418.1666, 689.3351]],
+    faster_rcnn = FasterRCNN(anchors=[[45, 90], [64, 64], [90, 45],
+                                      [90, 180], [128, 128], [180, 90],
+                                      [180, 360], [256, 256], [360, 180],
+                                      [360, 720], [512, 512], [720, 360]],
+                             model_path='models/vgg11_bn-6002323d.pth',
                              device=device)
+    # faster_rcnn = FasterRCNN(anchors=[[233.1948, 570.4430],
+    #                                   [103.9305, 419.0243],
+    #                                   [402.4835, 463.7479],
+    #                                   [109.3014,  86.1630],
+    #                                   [116.5302, 208.1511],
+    #                                   [ 35.6231,  59.8994],
+    #                                   [ 55.4458, 164.8338],
+    #                                   [670.7411, 365.8787],
+    #                                   [316.4950, 320.4709],
+    #                                   [181.8652, 330.0643],
+    #                                   [652.4779, 551.9171],
+    #                                   [238.8630, 162.8389],
+    #                                   [713.4675, 740.7275],
+    #                                   [541.8674, 221.0484],
+    #                                   [418.1666, 689.3351]],
+    #                          model_path='models/vgg19_bn-c79401a0.pth',
+    #                          model_path='models/vgg11_bn-6002323d.pth',
+    #                          model_path='models/vgg16-397923af.pth',
+    #                          device=device)
     faster_rcnn.to(device)
-
-    torchvision.models.detection.fasterrcnn_resnet50_fpn
 
     train_data = PascalDatasetImage(root_dir='../data/VOC2012/',
                                     classes='../data/VOC2012/voc.names',
@@ -73,21 +76,23 @@ def main():
                                 shuffle=False,
                                 num_workers=NUM_WORKERS)
 
-    faster_rcnn = pickle.load(open('FasterR-CNN_debug.pkl', 'rb'))
+    # faster_rcnn = pickle.load(open('FasterR-CNN_debug.pkl', 'rb'))
 
     if train:
         torch.random.manual_seed(12345)
         np.random.seed(12345)
 
-        plist = [{'params': faster_rcnn.fast_rcnn.features.parameters(), 'lr': 1e-6},
-                 {'params': faster_rcnn.rpn.parameters(), 'lr': 1e-4}
+        plist = [{'params': faster_rcnn.fast_rcnn.features.parameters(), 'lr': 1e-5},
+                 {'params': faster_rcnn.rpn.parameters(), 'lr': 1e-3}
                  ]
-        optimizer = optim.SGD(plist, lr=1e-4, momentum=0.9, weight_decay=5e-4)
+        optimizer = optim.SGD(plist, momentum=0.9, weight_decay=0.0005)
+        # optimizer = optim.Adam(plist)
 
         faster_rcnn.fit(train_data=train_data,
                         val_data=val_data,
                         optimizer=optimizer,
                         epochs=1,
+                        batch_size=256,
                         multi_scale=False,
                         shuffle=True)
 
@@ -105,8 +110,9 @@ def main():
                 height = image_info_['height']
                 image = to_numpy_image(images[0], size=(width, height))
                 for cls, bbox in zip(classes, bboxes):
-                    name = 'object'
-                    add_bbox_to_image(image, bbox.squeeze(), cls[0], name)
+                    if cls[0] > 0.95:
+                        name = 'object'
+                        add_bbox_to_image(image, bbox.squeeze(), cls[0].item(), name)
                 plt.imshow(image)
                 plt.show()
 
