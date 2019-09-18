@@ -182,9 +182,9 @@ def index_dict_list(dictionary, index):
     return {k: v[index] for k,v in dictionary.items() if isinstance(v, (list, torch.Tensor))}
 
 
-def random_choice(x, size):
+def random_choice(x, size, replace=False):
 
-    idx = torch.multinomial(torch.ones(x.numel()), size, replacement=False)
+    idx = torch.multinomial(torch.ones(x.numel()), size, replacement=replace)
 
     return x[idx].squeeze()
 
