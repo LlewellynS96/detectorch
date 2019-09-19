@@ -1,5 +1,6 @@
 import torch
 import pickle
+import copy
 import torch.optim as optim
 import numpy as np
 from torch.utils.data import DataLoader
@@ -8,7 +9,6 @@ from detectron import FastRCNN, FasterRCNN, RPN
 from dataset import PascalDatasetImage
 from utils import to_numpy_image, add_bbox_to_image, index_dict_list, jaccard
 from utils import NUM_WORKERS
-import torchvision
 
 
 def main():
@@ -54,7 +54,7 @@ def main():
                                     skip_truncated=False,
                                     skip_difficult=False,
                                     image_size=(800, 800),
-                                    do_transforms=True,
+                                    do_transforms=False,
                                     )
 
     val_data = PascalDatasetImage(root_dir='../data/VOC2012/',
@@ -76,40 +76,45 @@ def main():
                                 shuffle=False,
                                 num_workers=NUM_WORKERS)
 
-    # faster_rcnn = pickle.load(open('FasterR-CNN_working_RPN.pkl', 'rb'))
+    faster_rcnn = pickle.load(open('FasterR-CNN_debug_stage_0.pkl', 'rb'))
     faster_rcnn.to(device)
 
     if train:
         torch.random.manual_seed(12345)
         np.random.seed(12345)
 
-        plist = [{'params': faster_rcnn.fast_rcnn.features.parameters(), 'lr': 1e-4},
-                 {'params': faster_rcnn.rpn.parameters(), 'lr': 1e-4}
-                 ]
-        optimizer = optim.SGD(plist, momentum=0.9, weight_decay=0.0005)
-
-        faster_rcnn.fit(train_data=train_data,
-                        val_data=val_data,
-                        optimizer=optimizer,
-                        epochs=2,
-                        batch_size=256,
-                        multi_scale=False,
-                        shuffle=True,
-                        stage=0)
-
-        plist = [{'params': faster_rcnn.fast_rcnn.parameters(), 'lr': 1e-4}]
+        # plist = [{'params': faster_rcnn.fast_rcnn.features.parameters(), 'lr': 1e-5},
+        #          {'params': faster_rcnn.rpn.parameters(), 'lr': 1e-3}
+        #          ]
+        # optimizer = optim.SGD(plist, momentum=0.9, weight_decay=0.0005)
+        #
+        # faster_rcnn.fit(train_data=train_data,
+        #                 val_data=val_data,
+        #                 optimizer=optimizer,
+        #                 epochs=1,
+        #                 batch_size=256,
+        #                 multi_scale=False,
+        #                 shuffle=False,
+        #                 stage=0)
+        backbone = copy.deepcopy(faster_rcnn.fast_rcnn.features)
+        faster_rcnn.fast_rcnn = FastRCNN(num_classes=faster_rcnn.num_classes,
+                                         pretrained=True,
+                                         model_path=faster_rcnn.model_path,
+                                         device=device).to(device)
+        plist = [{'params': faster_rcnn.fast_rcnn.parameters(), 'lr': 1e-3}]
         optimizer = optim.SGD(plist, momentum=0.9, weight_decay=0.0005)
 
         faster_rcnn.fit(train_data=train_data,
                         val_data=None,
                         optimizer=optimizer,
+                        backbone=backbone,
                         epochs=3,
-                        batch_size=256,
+                        batch_size=-1,
                         multi_scale=False,
                         shuffle=True,
                         stage=1)
 
-        plist = [{'params': faster_rcnn.rpn.parameters(), 'lr': 1e-4}]
+        plist = [{'params': faster_rcnn.rpn.parameters(), 'lr': 1e-3}]
         optimizer = optim.SGD(plist, momentum=0.9, weight_decay=0.0005)
 
         faster_rcnn.fit(train_data=train_data,
@@ -121,7 +126,7 @@ def main():
                         shuffle=True,
                         stage=2)
 
-        plist = [{'params': faster_rcnn.fast_rcnn.classifier.parameters(), 'lr': 1e-4},
+        plist = [{'params': faster_rcnn.fast_rcnn.classifier.parameters(), 'lr': 1e-3},
                  {'params': faster_rcnn.fast_rcnn.cls.parameters(), 'lr': 1e-4},
                  {'params': faster_rcnn.fast_rcnn.reg.parameters(), 'lr': 1e-4}]
         optimizer = optim.SGD(plist, momentum=0.9, weight_decay=0.0005)
@@ -129,11 +134,11 @@ def main():
         faster_rcnn.fit(train_data=train_data,
                         val_data=None,
                         optimizer=optimizer,
-                        epochs=1,
+                        epochs=3,
                         batch_size=256,
                         multi_scale=False,
                         shuffle=True,
-                        stage=1)
+                        stage=3)
 
     if display_rois:
         torch.random.manual_seed(12345)

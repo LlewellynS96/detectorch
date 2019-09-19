@@ -79,14 +79,13 @@ def to_numpy_image(image, size, normalize=True):
     image : ndarray
         A ndarray representation of the image.
     """
-    image = image.permute(1, 2, 0).cpu().numpy()
+    image = np.array(image.permute(1, 2, 0).cpu().numpy())
     if normalize:
         image *= VGG_STD
         image += VGG_MEAN
     image *= 255.
     image = image.astype(dtype=np.uint8)
     image = cv2.resize(image, dsize=size, interpolation=cv2.INTER_CUBIC)
-    image = np.array(image)
 
     return image
 
@@ -270,7 +269,7 @@ def deparameterize_bboxes(reg, anchors):
 
     bboxes_xyxy = xywh2xyxy(bboxes_xywh)
 
-    bboxes_xyxy = torch.clamp(bboxes_xyxy, min=0., max=1.)
+    # bboxes_xyxy = torch.clamp(bboxes_xyxy, min=0., max=1.)
 
     return bboxes_xyxy
 

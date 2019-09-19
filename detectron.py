@@ -1,7 +1,6 @@
 import torch
 import torchvision
 import pickle
-import copy
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
@@ -24,9 +23,8 @@ FRCN_HI_THRESHOLD = 0.5
 FRCN_LO_LO_THRESHOLD = 0.1
 FRCN_LO_HI_THRESHOLD = 0.3
 RPN_POS_RATIO = 0.5
-FRCN_POS_RATIO = 0.5
+FRCN_POS_RATIO = 0.25
 RPN_NMS_THRESHOLD = 0.7
-N = 1000
 
 
 class FastRCNN(nn.Module):
@@ -48,12 +46,13 @@ class FastRCNN(nn.Module):
         self.features = self.model.features
         self.classifier = self.model.classifier
         self.cls = nn.Sequential(nn.Linear(4096, self.num_classes + 1),
-                                          nn.Softmax(dim=-1))
+                                 nn.Softmax(dim=-1))
         self.reg = nn.Linear(4096, self.num_classes * 4)
 
     def forward(self, x, rois):
         features = self.features(x)
-        rois = ops.roi_pool(features, rois, output_size=(7, 7), spatial_scale=1.)
+        grid_size = features.shape[-1]
+        rois = ops.roi_pool(features, rois, output_size=(7, 7), spatial_scale=grid_size)
         classifier = self.classifier(rois.view(-1, 512 * 7 * 7))
         cls = self.cls(classifier)
         reg = self.reg(classifier)
@@ -93,10 +92,9 @@ class FastRCNN(nn.Module):
                       unit='batches') as inner:
                 for images, images_info, images_transforms in train_dataloader:
                     images = images.to(self.device)
-                    target_rois = [torch.zeros(frcn_batch_size, 4, device=self.device)] * 2
+                    target_rois = [torch.zeros(frcn_batch_size, 4, device=self.device)] * image_batch_size
                     target_classes = torch.zeros(image_batch_size, frcn_batch_size, self.num_classes + 1, device=self.device)
                     target_bboxes = torch.zeros(image_batch_size, frcn_batch_size, 4, device=self.device)
-                    optimizer.zero_grad()
                     with torch.no_grad():
                         if backbone is None:
                             features = self.features(images)
@@ -112,12 +110,17 @@ class FastRCNN(nn.Module):
                             if rpn is not None:
                                 _, reg = rpn(features[i][None], nms=True)
                             rois = reg[:max_rois]
+                            rois = rois.clamp(min=0., max=1.)
                             ious = jaccard(rois, image_bboxes)
                             max_iou, argmax_iou = torch.max(ious, dim=1)
                             positive_mask = max_iou > FRCN_HI_THRESHOLD
                             positive_mask = torch.nonzero(positive_mask)
                             negative_mask = torch.nonzero((FRCN_LO_LO_THRESHOLD < max_iou) * (max_iou < FRCN_LO_HI_THRESHOLD))
-                            samples = random_choice(negative_mask, frcn_batch_size, replace=True)
+                            if negative_mask.numel() > 0:
+                                samples = random_choice(negative_mask, frcn_batch_size, replace=True)
+                            else:
+                                negative_mask = torch.nonzero(max_iou < FRCN_LO_HI_THRESHOLD)
+                                samples = random_choice(negative_mask, frcn_batch_size, replace=True)
                             frcn_pos_numel = int(frcn_batch_size * FRCN_POS_RATIO)
                             if positive_mask.numel() < frcn_pos_numel:
                                 frcn_pos_numel = positive_mask.numel()
@@ -127,10 +130,11 @@ class FastRCNN(nn.Module):
                             target_classes[i][:frcn_pos_numel] = image_classes[argmax_iou[samples[:frcn_pos_numel]]]
                             target_classes[i][frcn_pos_numel:, 0] = 1.
                             target_bboxes[i] = parameterize_bboxes(image_bboxes[argmax_iou[samples]], rois[samples])
+                    optimizer.zero_grad()
                     cls, reg = self(images, target_rois)
                     target_classes = target_classes.view(image_batch_size * frcn_batch_size, self.num_classes + 1)
                     target_bboxes = target_bboxes.view(image_batch_size * frcn_batch_size, 4)
-                    loss = self.loss(cls, reg, target_classes, target_bboxes)
+                    loss = self.loss(cls, reg, target_classes.detach(), target_bboxes.detach())
                     batch_loss.append(loss['total'].item())
                     loss['total'].backward()
                     optimizer.step()
@@ -147,7 +151,7 @@ class FastRCNN(nn.Module):
 
         return train_loss, val_loss
 
-    def loss(self, cls, reg, target_cls, target_reg, focal=False):
+    def loss(self, cls, reg, target_cls, target_reg, focal=True):
 
         loss = dict()
 
@@ -200,7 +204,8 @@ class RPN(nn.Module):
         grid_size = torch.tensor(features.shape[-2:], device=self.device)
         anchors = self.construct_anchors(grid_size)
 
-        reg = deparameterize_bboxes(reg.detach(), anchors)
+        reg = deparameterize_bboxes(reg, anchors)
+
         scores = cls[:, 0]
         if nms:
             keep = torchvision.ops.nms(reg, scores, RPN_NMS_THRESHOLD)
@@ -277,11 +282,14 @@ class RPN(nn.Module):
                     if target_bboxes.numel() > 0:
                         optimizer.zero_grad()
                         features = backbone(image)
-                        cls, reg = self(features, nms=False)
                         grid_size = torch.tensor(features.shape[-2:], device=self.device)
                         anchors = self.construct_anchors(grid_size)
+                        cls, reg = self(features, nms=False)
                         valid = self.validate_anchors(anchors)
+                        cls = cls[valid]
+                        reg = reg[valid]
                         anchors = anchors[valid]
+                        reg = parameterize_bboxes(reg, anchors)
                         ious = jaccard(anchors, target_bboxes)
                         max_iou, argmax_iou = torch.max(ious, dim=1)
                         positive_mask = max_iou > RPN_HI_THRESHOLD
@@ -299,8 +307,8 @@ class RPN(nn.Module):
                         target_cls[rpn_pos_numel:, 1] = 1
                         target_bboxes = target_bboxes[argmax_iou][target_anchors]
                         target_reg = parameterize_bboxes(target_bboxes, anchors[target_anchors])
-                        cls = cls[valid][target_anchors]
-                        reg = reg[valid][target_anchors]
+                        cls = cls[target_anchors]
+                        reg = reg[target_anchors]
                         loss = self.loss(cls, reg, target_cls, target_reg)
                         image_loss.append(loss['total'].item())
                         loss['total'].backward()
@@ -374,7 +382,33 @@ class RPN(nn.Module):
                 target_bboxes, _ = data.get_gt_bboxes(image_info_, image_transforms_)
                 target_bboxes = target_bboxes.to(self.device)
                 features = backbone(image)
-                cls, reg, target_cls, target_reg, _ = self(features, target_bboxes, batch_size)
+                grid_size = torch.tensor(features.shape[-2:], device=self.device)
+                anchors = self.construct_anchors(grid_size)
+                cls, reg = self(features, nms=False)
+                valid = self.validate_anchors(anchors)
+                cls = cls[valid]
+                reg = reg[valid]
+                anchors = anchors[valid]
+                reg = parameterize_bboxes(reg, anchors)
+                ious = jaccard(anchors, target_bboxes)
+                max_iou, argmax_iou = torch.max(ious, dim=1)
+                positive_mask = max_iou > RPN_HI_THRESHOLD
+                abs_max_iou = torch.argmax(ious, dim=0)
+                positive_mask[abs_max_iou] = 1
+                positive_mask = torch.nonzero(positive_mask)
+                negative_mask = torch.nonzero(max_iou < RPN_LO_THRESHOLD)
+                target_anchors = random_choice(negative_mask, batch_size)
+                rpn_pos_numel = int(batch_size * RPN_POS_RATIO)
+                if positive_mask.numel() < rpn_pos_numel:
+                    rpn_pos_numel = positive_mask.numel()
+                target_anchors[:rpn_pos_numel] = random_choice(positive_mask, rpn_pos_numel)
+                target_cls = torch.zeros(batch_size, 2, device=self.device)
+                target_cls[:rpn_pos_numel, 0] = 1
+                target_cls[rpn_pos_numel:, 1] = 1
+                target_bboxes = target_bboxes[argmax_iou][target_anchors]
+                target_reg = parameterize_bboxes(target_bboxes, anchors[target_anchors])
+                cls = cls[target_anchors]
+                reg = reg[target_anchors]
                 loss = self.loss(cls, reg, target_cls, target_reg)
                 losses.append(loss['total'].item())
                 if i > len(val_dataloader) * fraction:
@@ -415,7 +449,7 @@ class FasterRCNN(nn.Module):
 
         pass
 
-    def fit(self, train_data, optimizer, batch_size=64, epochs=1,
+    def fit(self, train_data, optimizer, backbone=None, batch_size=64, epochs=1,
             val_data=None, shuffle=True, multi_scale=True, checkpoint_frequency=1, stage=0):
 
         self.train()
@@ -449,19 +483,14 @@ class FasterRCNN(nn.Module):
         elif stage == 1:
 
             self.rpn.eval()
-            backbone = copy.deepcopy(self.fast_rcnn.features)
-            self.fast_rcnn = FastRCNN(num_classes=self.num_classes,
-                                      pretrained=True,
-                                      model_path=self.model_path,
-                                      device=self.device)
             train_loss, val_loss = self.fast_rcnn.fit(train_data=train_data,
                                                       optimizer=optimizer,
                                                       backbone=backbone,
                                                       rpn=self.rpn,
                                                       max_rois=2000,
                                                       image_batch_size=2,
-                                                      frcn_batch_size=256,
-                                                      epochs=1,
+                                                      frcn_batch_size=128,
+                                                      epochs=epochs,
                                                       val_data=val_data,
                                                       shuffle=shuffle,
                                                       multi_scale=multi_scale)
@@ -498,8 +527,8 @@ class FasterRCNN(nn.Module):
                                                       rpn=self.rpn,
                                                       max_rois=2000,
                                                       image_batch_size=2,
-                                                      frcn_batch_size=256,
-                                                      epochs=1,
+                                                      frcn_batch_size=128,
+                                                      epochs=epochs,
                                                       val_data=val_data,
                                                       shuffle=shuffle,
                                                       multi_scale=multi_scale)
