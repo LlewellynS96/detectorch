@@ -178,7 +178,10 @@ def jaccard(boxes_a, boxes_b):
 
 def index_dict_list(dictionary, index):
 
-    return {k: v[index] for k,v in dictionary.items() if isinstance(v, (list, torch.Tensor))}
+    try:
+        return {k: v[index] for k,v in dictionary.items() if isinstance(v, (list, torch.Tensor))}
+    except IndexError:
+        return None
 
 
 def random_choice(x, size, replace=False):
@@ -268,8 +271,6 @@ def deparameterize_bboxes(reg, anchors):
     bboxes_xywh[:, 2:] = torch.exp(reg[:, 2:]) * anchors_xywh[:, 2:]
 
     bboxes_xyxy = xywh2xyxy(bboxes_xywh)
-
-    # bboxes_xyxy = torch.clamp(bboxes_xyxy, min=0., max=1.)
 
     return bboxes_xyxy
 

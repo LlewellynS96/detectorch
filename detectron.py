@@ -50,12 +50,15 @@ class FastRCNN(nn.Module):
         self.reg = nn.Linear(4096, self.num_classes * 4)
 
     def forward(self, x, rois):
+        batch_size = x.shape[0]
         features = self.features(x)
         grid_size = features.shape[-1]
-        rois = ops.roi_pool(features, rois, output_size=(7, 7), spatial_scale=grid_size)
-        classifier = self.classifier(rois.view(-1, 512 * 7 * 7))
+        roi_features = ops.roi_pool(features, rois, output_size=(7, 7), spatial_scale=grid_size)
+        classifier = self.classifier(roi_features.view(batch_size, -1, 512 * 7 * 7))
         cls = self.cls(classifier)
         reg = self.reg(classifier)
+
+        reg = reg.reshape(batch_size, -1, self.num_classes, 4)
 
         return cls, reg
 
@@ -92,6 +95,7 @@ class FastRCNN(nn.Module):
                       unit='batches') as inner:
                 for images, images_info, images_transforms in train_dataloader:
                     images = images.to(self.device)
+                    image_batch_size = len(images)
                     target_rois = [torch.zeros(frcn_batch_size, 4, device=self.device)] * image_batch_size
                     target_classes = torch.zeros(image_batch_size, frcn_batch_size, self.num_classes + 1, device=self.device)
                     target_bboxes = torch.zeros(image_batch_size, frcn_batch_size, 4, device=self.device)
@@ -108,8 +112,8 @@ class FastRCNN(nn.Module):
                         image_classes = image_classes.to(self.device)
                         if image_bboxes.numel() > 0:
                             if rpn is not None:
-                                _, reg = rpn(features[i][None], nms=True)
-                            rois = reg[:max_rois]
+                                _, reg = rpn(features[i][None])
+                            rois = reg[0, :max_rois]
                             rois = rois.clamp(min=0., max=1.)
                             ious = jaccard(rois, image_bboxes)
                             max_iou, argmax_iou = torch.max(ious, dim=1)
@@ -132,8 +136,6 @@ class FastRCNN(nn.Module):
                             target_bboxes[i] = parameterize_bboxes(image_bboxes[argmax_iou[samples]], rois[samples])
                     optimizer.zero_grad()
                     cls, reg = self(images, target_rois)
-                    target_classes = target_classes.view(image_batch_size * frcn_batch_size, self.num_classes + 1)
-                    target_bboxes = target_bboxes.view(image_batch_size * frcn_batch_size, 4)
                     loss = self.loss(cls, reg, target_classes.detach(), target_bboxes.detach())
                     batch_loss.append(loss['total'].item())
                     loss['total'].backward()
@@ -169,6 +171,82 @@ class FastRCNN(nn.Module):
         loss['total'] = loss['cls'] + loss['reg']
         return loss
 
+    def post_process(self, cls, reg, rois, max_rois=300):
+        batch_size = cls.shape[0]
+
+        classes = []
+        bboxes = []
+
+        for i in range(batch_size):
+            cls_argmax = torch.argmax(cls[i], dim=-1) - 1.
+            mask = cls_argmax >= 0
+            cls_ = cls[i][mask]
+            reg_ = reg[i][mask]
+            rois_ = rois[i][mask]
+
+            if reg_.numel() > 0:
+                reg_ = deparameterize_bboxes(reg_, rois_)
+                reg_ = torch.clamp(reg_, min=0., max=1.)
+
+                scores = cls_[:, 0]
+                sort = torch.argsort(scores, descending=True)
+                classes.append(cls_[sort][:max_rois])
+                bboxes.append(reg_[sort][:max_rois])
+            else:
+                classes.append(torch.tensor([], device=self.device))
+                bboxes.append(torch.tensor([], device=self.device))
+
+        return classes, bboxes
+
+    def process_bboxes(self, cls, reg, confidence_threshold=0.01, overlap_threshold=0.5, nms=True):
+
+        image_idx_ = []
+        bboxes_ = []
+        confidence_ = []
+        classes_ = []
+
+        for i, (classes, bboxes) in enumerate(zip(cls, reg)):
+
+            confidence, classes = torch.max(classes, dim=-1)
+            classes -= 1
+
+            mask = confidence > confidence_threshold
+
+            if sum(mask) == 0:
+                continue
+
+            bboxes = bboxes[mask]
+            confidence = confidence[mask]
+            classes = classes[mask]
+
+            if nms:
+                cls = torch.unique(classes)
+                for c in cls:
+                    cls_mask = (classes == c).nonzero().flatten()
+                    mask = torchvision.ops.nms(bboxes[cls_mask], confidence[cls_mask], overlap_threshold)
+                    bboxes_.append(bboxes[cls_mask][mask])
+                    confidence_.append(confidence[cls_mask][mask])
+                    classes_.append(classes[cls_mask][mask])
+                    image_idx_.append(torch.ones(len(bboxes[cls_mask][mask]), device=self.device) * i)
+            else:
+                bboxes_.append(bboxes)
+                confidence_.append(confidence)
+                classes_.append(classes)
+                image_idx_.append(torch.ones(len(bboxes)) * i)
+
+        if len(bboxes_) > 0:
+            bboxes = torch.cat(bboxes_).view(-1, 4)
+            classes = torch.cat(classes_).flatten()
+            confidence = torch.cat(confidence_).flatten()
+            image_idx = torch.cat(image_idx_).flatten()
+
+            return bboxes, classes, confidence, image_idx
+        else:
+            return torch.tensor([], device=self.device), \
+                   torch.tensor([], device=self.device), \
+                   torch.tensor([], device=self.device), \
+                   torch.tensor([], device=self.device)
+
 
 class RPN(nn.Module):
 
@@ -192,26 +270,38 @@ class RPN(nn.Module):
                              out_channels=4 * self.num_anchors,
                              kernel_size=1)
 
-    def forward(self, x, nms=False):
+    def forward(self, x):
+        batch_size = x.shape[0]
         features = F.relu(self.windows(x))
         cls = self.cls(features)
         reg = self.reg(features)
 
-        cls = cls.permute(0, 2, 3, 1).reshape(-1, 2)
+        cls = cls.permute(0, 2, 3, 1).reshape(batch_size, -1, 2)
         cls = torch.softmax(cls, dim=-1)
-        reg = reg.permute(0, 2, 3, 1).reshape(-1, 4)
+        reg = reg.permute(0, 2, 3, 1).reshape(batch_size, -1, 4)
 
-        grid_size = torch.tensor(features.shape[-2:], device=self.device)
+        return cls, reg
+
+    def post_process(self, cls, reg, grid_size, max_rois=2000, nms=False):
         anchors = self.construct_anchors(grid_size)
 
-        reg = deparameterize_bboxes(reg, anchors)
+        batch_size = cls.shape[0]
+        confidence = torch.zeros(batch_size, max_rois, 2, device=self.device)
+        bboxes = []
 
-        scores = cls[:, 0]
-        if nms:
-            keep = torchvision.ops.nms(reg, scores, RPN_NMS_THRESHOLD)
-            return cls[keep], reg[keep]
-        else:
-            return cls, reg
+        for i in range(batch_size):
+            reg_ = deparameterize_bboxes(reg[i], anchors)
+            reg_ = torch.clamp(reg_, min=0., max=1.)
+
+            scores = cls[i, :, 0]
+            if nms:
+                keep = torchvision.ops.nms(reg_, scores, RPN_NMS_THRESHOLD)
+            else:
+                keep = torch.argsort(scores, descending=True)
+            confidence[i] = cls[i][keep][:max_rois]
+            bboxes.append(reg_[keep][:max_rois])
+
+        return confidence, bboxes
 
     def construct_anchors(self, grid_size):
 
@@ -284,12 +374,11 @@ class RPN(nn.Module):
                         features = backbone(image)
                         grid_size = torch.tensor(features.shape[-2:], device=self.device)
                         anchors = self.construct_anchors(grid_size)
-                        cls, reg = self(features, nms=False)
+                        cls, reg = self(features)
                         valid = self.validate_anchors(anchors)
                         cls = cls[valid]
                         reg = reg[valid]
                         anchors = anchors[valid]
-                        reg = parameterize_bboxes(reg, anchors)
                         ious = jaccard(anchors, target_bboxes)
                         max_iou, argmax_iou = torch.max(ious, dim=1)
                         positive_mask = max_iou > RPN_HI_THRESHOLD
@@ -437,13 +526,17 @@ class FasterRCNN(nn.Module):
 
     def forward(self, x):
         features = self.fast_rcnn.features(x)
-        cls, reg = self.rpn(features)
-        rois = self.fast_rcnn.roi_pool(features, reg)
-        classifier = self.classifier(rois)
-        cls = self.cls(classifier)
-        reg = self.reg(classifier)
+        cls, reg = self.rpn(features, nms=True)
+        grid_size = torch.tensor(features.shape[-2:], device=self.device)
+        cls, reg = self.rpn.post_process(cls, reg, grid_size, max_rois=1000, nms=True)
+        grid_size = features.shape[-1]
+        rois = ops.roi_pool(features, reg, output_size=(7, 7), spatial_scale=grid_size)
+        classifier = self.fast_rcnn.classifier(rois)
+        cls = self.fast_rcnn.cls(classifier)
+        reg = self.fast_rcnn.reg(classifier)
+        cls, reg = self.fast_rcnn.pos
 
-        return cls, reg
+        return cls, reg, rois
 
     def predict(self, x):
 
@@ -526,7 +619,7 @@ class FasterRCNN(nn.Module):
                                                       backbone=self.fast_rcnn.features,
                                                       rpn=self.rpn,
                                                       max_rois=2000,
-                                                      image_batch_size=2,
+                                                      image_batch_size=8,
                                                       frcn_batch_size=128,
                                                       epochs=epochs,
                                                       val_data=val_data,
