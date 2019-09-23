@@ -19,7 +19,7 @@ def main():
 
     display = True
     display_rois = False
-    train = True
+    train = False
 
     # faster_rcnn = FasterRCNN(anchors=[[45, 90], [64, 64], [90, 45],
     #                                   [90, 180], [128, 128], [180, 90],
@@ -54,7 +54,7 @@ def main():
                                     skip_truncated=False,
                                     skip_difficult=False,
                                     image_size=(800, 800),
-                                    do_transforms=False,
+                                    do_transforms=True,
                                     )
 
     val_data = PascalDatasetImage(root_dir='../data/VOC2012/',
@@ -96,7 +96,7 @@ def main():
         #                 multi_scale=False,
         #                 shuffle=False,
         #                 stage=0)
-
+        #
         # backbone = copy.deepcopy(faster_rcnn.fast_rcnn.features)
         # faster_rcnn.fast_rcnn = FastRCNN(num_classes=faster_rcnn.num_classes,
         #                                  pretrained=True,
@@ -109,7 +109,7 @@ def main():
         #                 val_data=None,
         #                 optimizer=optimizer,
         #                 backbone=backbone,
-        #                 epochs=2,
+        #                 epochs=6,
         #                 batch_size=-1,
         #                 multi_scale=False,
         #                 shuffle=True,
@@ -119,7 +119,7 @@ def main():
         # optimizer = optim.SGD(plist, momentum=0.9, weight_decay=0.0005)
         #
         # faster_rcnn.fit(train_data=train_data,
-        #                 val_data=val_data,
+        #                 val_data=None,
         #                 optimizer=optimizer,
         #                 epochs=2,
         #                 batch_size=256,
@@ -186,13 +186,15 @@ def main():
                 grid_size = torch.tensor(features.shape[-2:], device=device)
                 classes, rois = faster_rcnn.rpn.post_process(classes, reg, grid_size, nms=True)
                 cls, reg = faster_rcnn.fast_rcnn(images, rois)
-                cls, bboxes = faster_rcnn.fast_rcnn.post_process(cls, reg, rois, max_rois=1000)
-                classes, bboxes, confidences, image_idx = faster_rcnn.fast_rcnn.process_bboxes(cls, reg)
+                cls, bboxes = faster_rcnn.fast_rcnn.post_process(cls, reg, rois, max_rois=300)
+                bboxes, classes, confidences, image_idx = faster_rcnn.fast_rcnn.process_bboxes(cls, bboxes, confidence_threshold=0.8, overlap_threshold=0.4)
                 for idx, image in enumerate(images):
                     width = image_info['width'][idx]
                     height = image_info['height'][idx]
                     image = to_numpy_image(image, size=(width, height))
                     mask = image_idx == idx
+                    if sum(mask) == 0:
+                        continue
                     for bbox, cls, confidence in zip(bboxes[mask], classes[mask], confidences[mask]):
                         name = train_data.classes[cls]
                         add_bbox_to_image(image, bbox, confidence, name)
