@@ -365,3 +365,12 @@ def export_prediction(cls, image_id, top, left, bottom, right, confidence,
         prediction = map(to_repr, prediction)
         prediction = ' '.join(prediction)
         f.write(prediction)
+
+
+class nullcontext:
+
+    def __enter__(self):
+        return None
+
+    def __exit__(self, *args):
+        pass
