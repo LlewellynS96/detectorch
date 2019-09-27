@@ -42,7 +42,6 @@ def main():
                                       [713.4675, 740.7275],
                                       [541.8674, 221.0484],
                                       [418.1666, 689.3351]],
-                             # model_path='models/vgg19_bn-c79401a0.pth',
                              model_path='models/vgg11_bn-6002323d.pth',
                              # model_path='models/vgg16-397923af.pth',
                              device=device)
