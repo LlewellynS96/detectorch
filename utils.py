@@ -12,12 +12,12 @@ VGG_STD = [0.229, 0.224, 0.225]
 
 def read_classes(file):
     """
-    Utility function that parses a text file containing all the classes
-    that are present in a specific dataset.
+    Parses a text file containing all the classes that are present
+    in a specific dataset.
     Parameters
     ----------
     file : str
-        A string pointing to the text file to be read.
+        The path to the text file to be read.
 
     Returns
     -------
@@ -33,7 +33,26 @@ def read_classes(file):
 
 
 def get_annotations(annotations_dir, img):
+    """
+    Collects all the annotations for a specific image in any of the
+    Pascal VOC datasets.
+    Parameters
+    ----------
+    annotations_dir : str
+        The path to the directory containing all the Pascal VOC annotations.
+    img : str
+        The ID of the image for which the annotations have to be collected.
 
+    Returns
+    -------
+    list
+        A list of tuples containing the annotations for the requested image.
+        Each tuple corresponds to a single bounding box and the information
+        withing each tuple is (class_name, bbox_xmin, bbox_ymin, bbox_xmax,
+        bbox_ymax, is_truncated, is_difficult). The bounding box coordinates
+        are normalized to the width and height of the image.
+
+    """
     file = os.path.join(annotations_dir, img + '.xml')
     tree = Et.parse(file)
     root = tree.getroot()
@@ -62,8 +81,8 @@ def get_annotations(annotations_dir, img):
 
 def to_numpy_image(image, size, normalize=True):
     """
-    A utility function that converts a Tensor in the range [0., 1.] to a
-    resized ndarray in the range [0, 255].
+    Converts a Tensor in the range [0., 1.] to a resized
+    Numpy array in the range [0, 255].
     Parameters
     ----------
     image : Tensor
@@ -71,13 +90,13 @@ def to_numpy_image(image, size, normalize=True):
     size : tuple of int
         The size (w, h) to which the image should be resized.
     normalize : bool
-        A flag which indicates whether the image was orignially normalized,
-        which means that it should be de-normalized when converting to an
+        A flag which indicates whether the image was originally normalized,
+        which means that it should be "de-normalized" when converting to an
         array.
     Returns
     -------
     image : ndarray
-        A ndarray representation of the image.
+        A Numpy array representation of the image.
     """
     image = np.array(image.permute(1, 2, 0).cpu().numpy())
     if normalize:
@@ -92,16 +111,17 @@ def to_numpy_image(image, size, normalize=True):
 
 def add_bbox_to_image(image, bbox, confidence, cls):
     """
-    A utility function that adds a bounding box with labels to an image in-place.
+    Adds a visual bounding box with labels to an image in-place.
 
     Parameters
     ----------
     image : ndarray
-        An ndarray containing the image.
+        A Numpy array containing the image.
     bbox : array_like
         An array (x1, y1, x2, y2) containing the coordinates of the upper-
         left and bottom-right corners of the bounding box to be added to
-        the image.
+        the image. The coordinates should be normalized to the width and
+        the height of the image.
     confidence : float
         A value representing the confidence of an object within the bounding
         box. This value will be displayed as part of the label.
@@ -140,15 +160,15 @@ def jaccard(boxes_a, boxes_b):
     Parameters
     ----------
         boxes_a : Tensor
-            An array whose shape is :math:`(N, 4)`. :math:`N` is the number
+            A Tensor whose shape is :math:`(N, 4)`. :math:`N` is the number
             of bounding boxes. The dtype should be :obj:`float`.
         boxes_b : Tensor
-            An array similar to :obj:`bbox_a`, whose shape is :math:`(K, 4)`.
+            A Tensor similar to :obj:`bbox_a`, whose shape is :math:`(K, 4)`.
             The dtype should be :obj:`float`.
     Returns
     -------
         Tensor
-            An array whose shape is :math:`(N, K)`. An element at index :math:`(n, k)`
+            A Tensor whose shape is :math:`(N, K)`. An element at index :math:`(n, k)`
             contains IoUs between :math:`n` th bounding box in :obj:`bbox_a` and
             :math:`k` th bounding box in :obj:`bbox_b`.
     Notes
@@ -177,7 +197,22 @@ def jaccard(boxes_a, boxes_b):
 
 
 def index_dict_list(dictionary, index):
+    """
+    Returns the items at a specified index in a dictionary
+    as a dictionary. This is used to convert a dictionary of
+    lists to a list of dictionaries.
+    Parameters
+    ----------
+    dictionary : dict
+        The dictionary containing lists of items.
+    index : int
+        The index in each list which should be returned.
 
+    Returns
+    -------
+    dict
+        The dictionary contained at the specified index.
+    """
     try:
         return {k: v[index] for k,v in dictionary.items() if isinstance(v, (list, torch.Tensor))}
     except IndexError:
@@ -185,7 +220,23 @@ def index_dict_list(dictionary, index):
 
 
 def random_choice(x, size, replace=False):
+    """
+    Randomly sample from a Tensor. This is similar
+    to numpy.choice.
+    Parameters
+    ----------
+    x : Tensor
+        The Tensor to be sampled from.
+    size : int
+        The number of samples to return.
+    replace : bool
 
+    Returns
+    -------
+    Tensor
+        A Tensor containing :math:`size` random samples from the original Tensor.
+
+    """
     idx = torch.multinomial(torch.ones(x.numel()), size, replacement=replace)
 
     return x[idx].squeeze()
@@ -193,19 +244,19 @@ def random_choice(x, size, replace=False):
 
 def xyxy2xywh(xyxy):
     """
-    Utility function that converts bounding boxes that are in the form
-    (x1, y1, x2, y2) to (x_c, y_c, w, h).
+    Converts bounding boxes that are in the form (x1, y1, x2, y2)
+    to (x_c, y_c, w, h).
     Parameters
     ----------
     xyxy : Tensor
-        A tensor whose shape is :math:`(N, 4)` where the elements in the
+        A Tensor whose shape is :math:`(N, 4)` where the elements in the
         0th and 1st column represent the x and y coordinates of the top left
         corner of the bounding box and the 2nd and 3rd column represent the
         x and y coordinates of the bottom right corner of the bounding box.
     Returns
     -------
     xywh : Tensor
-        A tensor whose shape is :math:`(N, 4)` where the elements in the
+        A Tensor whose shape is :math:`(N, 4)` where the elements in the
         0th and 1st column represent the x and y coordinates of the center
         of the bounding box and the 2nd and 3rd column represent the
         width and height of the bounding box.
@@ -219,12 +270,12 @@ def xyxy2xywh(xyxy):
 
 def xywh2xyxy(xywh):
     """
-    Converts bounding boxes that are in the form
-    (x_c, y_c, w, h) to (x1, y1, x2, y2).
+    Converts bounding boxes that are in the form (x_c, y_c, w, h)
+    to (x1, y1, x2, y2).
     Parameters
     ----------
     xywh : Tensor
-        A tensor whose shape is :math:`(N, 4)` where the elements in the
+        A Tensor whose shape is :math:`(N, 4)` where the elements in the
         0th and 1st column represent the x and y coordinates of the center
         of the bounding box and the 2nd and 3rd column represent the
         width and height of the bounding box.
@@ -232,7 +283,7 @@ def xywh2xyxy(xywh):
     Returns
     -------
     xyxy : Tensor
-        A tensor whose shape is :math:`(N, 4)` where the elements in the
+        A Tensor whose shape is :math:`(N, 4)` where the elements in the
         0th and 1st column represent the x and y coordinates of the top left
         corner of the bounding box and the 2nd and 3rd column represent the
         x and y coordinates of the bottom right corner of the bounding box.
@@ -246,7 +297,27 @@ def xywh2xyxy(xywh):
 
 
 def parameterize_bboxes(bboxes, anchors):
+    """
+    Parameterizes bounding boxes according to the R-CNN conventions
+    given the coordinates for the bounding boxes and their
+    corresponding anchors.
+    Parameters
+    ----------
+    bboxes : Tensor
+        A Tensor whose shape is :math:`(N, 4)` representing the coordinates
+        of :math:`N` bounding boxes in the format (x1, y1, x2, y2).
+    anchors : Tensor
+        A Tensor whose shape is :math:`(N, 4)` representing the coordinates
+        of the :math:`N` anchors in the format (x1, y1, x2, y2) that correspond
+        to the different bounding boxes.
 
+    Returns
+    -------
+    Tensor
+        A Tensor whose shape is :math:`(N, 4)` representing the R-CNN bounding
+        box parameters of :math:`N` bounding boxes in the format
+        :math:`(t_x, t_y, t_w, t_h)`.
+    """
     assert bboxes.shape == anchors.shape
     assert bboxes.shape[-1] == 4
 
@@ -260,7 +331,27 @@ def parameterize_bboxes(bboxes, anchors):
 
 
 def deparameterize_bboxes(reg, anchors):
+    """
+    Parameterizes bounding boxes according to the R-CNN conventions
+    given the coordinates for the bounding boxes and their
+    corresponding anchors.
+    Parameters
+    ----------
+    reg : Tensor
+        A Tensor whose shape is :math:`(N, 4)` representing the R-CNN bounding
+        box parameters of :math:`N` bounding boxes in the format
+        :math:`(t_x, t_y, t_w, t_h)`.
+    anchors : Tensor
+        A Tensor whose shape is :math:`(N, 4)` representing the coordinates
+        of the :math:`N` anchors in the format (x1, y1, x2, y2) that correspond
+        to the different bounding boxes.
 
+    Returns
+    -------
+    Tensor
+        A Tensor whose shape is :math:`(N, 4)` representing the coordinates
+        of :math:`N` bounding boxes in the format (x1, y1, x2, y2).
+    """
     assert reg.shape == anchors.shape
     assert anchors.shape[-1] == 4
 
@@ -325,19 +416,19 @@ def export_prediction(cls, image_id, top, left, bottom, right, confidence,
         The Pascal VOC image ID, i.e. the image's file name.
     top : float
         The y-coordinate of the top-left corner of the predicted bounding box. The value
-        should be normalised to the height of the image.
+        should be normalized to the height of the image.
     left : float
         The x-coordinate of the top-left corner of the predicted bounding box. The value
-        should be normalised to the width of the image.
+        should be normalized to the width of the image.
     bottom : float
         The y-coordinate of the bottom-right corner of the predicted bounding box. The value
-        should be normalised to the height of the image.
+        should be normalized to the height of the image.
     right : float
         The x-coordinate of the bottom-right corner of the predicted bounding box. The value
-        should be normalised to the width of the image.
+        should be normalized to the width of the image.
     confidence : float
         A confidence value attached to the prediction, which should be generated by the
-        detector.  The value does not have to be normalised, but a greater value corresponds
+        detector.  The value does not have to be normalized, but a greater value corresponds
         to greater confidence.  This value is used when calculating the precision-recall graph
         for the detector.
     prefix : str

@@ -94,7 +94,7 @@ class PascalDatasetImage(Dataset):
         image_info : dict
             A dictionary object containing meta information about the image.
         target : Tensor
-            A Tensor representing the target output of the YOLOv2 network which was
+            A Tensor representing the target output of the R-CNN network which was
             used to initialise the dataset object.
 
         """
