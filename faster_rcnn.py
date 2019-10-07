@@ -1,6 +1,7 @@
 import torch
 import torch.optim as optim
 import numpy as np
+import pickle
 import matplotlib.pyplot as plt
 from detectron import FastRCNN, FasterRCNN, RPN
 from dataset import PascalDatasetImage
@@ -13,7 +14,7 @@ def main():
 
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    predict = False
+    predict = True
     train = True
     joint = False
 
@@ -61,9 +62,18 @@ def main():
                                   do_transforms=False,
                                   )
 
+    test_data = PascalDatasetImage(root_dir='../data/VOC2007/',
+                                   classes='../data/VOC2012/voc.names',
+                                   dataset='test',
+                                   skip_truncated=False,
+                                   skip_difficult=False,
+                                   image_size=(800, 800),
+                                   do_transforms=False
+                                   )
+
     if train:
-        torch.random.manual_seed(12345)
-        np.random.seed(12345)
+        # torch.random.manual_seed(12345)
+        # np.random.seed(12345)
         if joint:
             plist = [{'params': faster_rcnn.rpn.parameters()},
                      {'params': faster_rcnn.fast_rcnn.parameters()}]
@@ -79,30 +89,43 @@ def main():
                                        shuffle=True,
                                        multi_scale=True
                                        )
+
         else:
-            epochs = [15, 30, 10, 10]
-            image_batch_size = [1, 4, 1, 12]
-            roi_batch_size = [128, 128, 128, 128]
+            # epochs = [15, 30, 10, 10]
+            # image_batch_size = [1, 4, 1, 12]
+            # roi_batch_size = [128, 128, 128, 128]
+            #
+            # faster_rcnn.alternate_training(train_data=train_data,
+            #                                val_data=val_data,
+            #                                epochs=epochs,
+            #                                image_batch_size=image_batch_size,
+            #                                roi_batch_size=roi_batch_size,
+            #                                multi_scale=True,
+            #                                shuffle=True,
+            #                                stage=None)
+            faster_rcnn = pickle.load(open('models/FasterRCNN_Alternate_Training_stage_0.pkl', 'rb'))
 
             faster_rcnn.alternate_training(train_data=train_data,
-                                           val_data=val_data,
-                                           epochs=epochs,
-                                           image_batch_size=image_batch_size,
-                                           roi_batch_size=roi_batch_size,
+                                           val_data=None,
+                                           epochs=10,
+                                           image_batch_size=2,
+                                           roi_batch_size=128,
                                            multi_scale=True,
                                            shuffle=True,
-                                           stage=None)
+                                           stage=1)
 
     if predict:
         torch.random.manual_seed(12345)
         np.random.seed(12345)
 
-        faster_rcnn.predict(dataset=val_data,
+        faster_rcnn = pickle.load(open('models/FasterRCNN_Joint_Training_joint_training_4.pkl', 'rb'))
+
+        faster_rcnn.predict(dataset=test_data,
                             batch_size=6,
-                            confidence_threshold=0.1,
-                            overlap_threshold=0.4,
-                            show=False,
-                            export=True
+                            confidence_threshold=0.5,
+                            overlap_threshold=0.2,
+                            show=True,
+                            export=False
                             )
 
 

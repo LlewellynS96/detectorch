@@ -43,7 +43,7 @@ class FastRCNN(nn.Module):
             state_dict = torch.load(self.model_path)
             self.model.load_state_dict({k: v for k, v in state_dict.items() if k in self.model.state_dict()})
         self.model.features = nn.Sequential(*list(self.model.features.children())[:-1])
-        self.model.classifier = nn.Sequential(*list(self.model.classifier.children())[:-1])
+        self.model.classifier = nn.Sequential(*list(self.model.classifier.children())[:-2])
 
         self.features = self.model.features
         self.classifier = self.model.classifier
@@ -77,7 +77,7 @@ class FastRCNN(nn.Module):
             param.requires_grad = False
 
     def fit(self, train_data, optimizer, backbone=None, rpn=None, rois=None, max_rois=2000, image_batch_size=2,
-            roi_batch_size=32, epochs=1, val_data=None, shuffle=True, multi_scale=True, checkpoint_frequency=100):
+            roi_batch_size=32, epochs=1, val_data=None, shuffle=True, multi_scale=True):
 
         assert rpn or rois
 
@@ -153,10 +153,10 @@ class FastRCNN(nn.Module):
                     loss = self.loss(cls, reg, target_classes.detach(), target_bboxes.detach())
                     batch_loss.append(loss['total'].item())
                     loss['total'].backward()
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1., norm_type='inf')
                     optimizer.step()
                     inner.set_postfix_str(' FRCN Training Loss: {:.6f}'.format(np.mean(batch_loss)))
                     inner.update()
-                    break
                 train_loss.append(np.mean(batch_loss))
                 if val_data is not None:
                     val_data.reset_image_size()
@@ -190,6 +190,7 @@ class FastRCNN(nn.Module):
             loss['reg'] = 0.
 
         loss['total'] = loss['cls'] + loss['reg']
+
         return loss
 
     def calculate_loss(self, data, backbone, rpn, roi_batch_size=256, fraction=0.05):
@@ -242,7 +243,7 @@ class FastRCNN(nn.Module):
                     image_classes = image_classes.to(self.device)
                     if image_bboxes.numel() > 0:
                         if rpn is not None:
-                            cls, reg = rpn(features[i][None])
+                            cls, reg = rpn(features[j][None])
                             grid_size = torch.tensor(features.shape[-2:], device=self.device)
                             rois = rpn.post_process(cls, reg, grid_size, MAX_TRAIN_RPN_ROIS, True)[1][0]
                         ious = jaccard(rois, image_bboxes)
@@ -267,10 +268,10 @@ class FastRCNN(nn.Module):
                             frcn_pos_numel = positive_mask.numel()
                         if frcn_pos_numel > 0:
                             samples[:frcn_pos_numel] = random_choice(positive_mask, frcn_pos_numel)
-                        target_rois[i] = rois[samples]
-                        target_classes[i][:frcn_pos_numel] = image_classes[argmax_iou[samples[:frcn_pos_numel]]]
-                        target_classes[i][frcn_pos_numel:, 0] = 1.
-                        target_bboxes[i] = parameterize_bboxes(image_bboxes[argmax_iou[samples]], rois[samples])
+                        target_rois[j] = rois[samples]
+                        target_classes[j][:frcn_pos_numel] = image_classes[argmax_iou[samples[:frcn_pos_numel]]]
+                        target_classes[j][frcn_pos_numel:, 0] = 1.
+                        target_bboxes[j] = parameterize_bboxes(image_bboxes[argmax_iou[samples]], rois[samples])
                 cls, reg = self(images, target_rois)
                 loss = self.loss(cls, reg, target_classes.detach(), target_bboxes.detach())
                 losses.append(loss['total'].item())
@@ -404,14 +405,20 @@ class RPN(nn.Module):
         bboxes = []
 
         for i in range(batch_size):
+            scores_copy = cls[i, :, 0]
             reg_copy = deparameterize_bboxes(reg[i], anchors)
             reg_copy = torch.clamp(reg_copy, min=0., max=1.)
+            keep = np.nonzero(reg_copy[:, 2] - reg_copy[:, 0]).squeeze()
+            reg_copy = reg_copy[keep]
+            scores_copy = scores_copy[keep]
+            keep = np.nonzero(reg_copy[:, 3] - reg_copy[:, 1]).squeeze()
+            reg_copy = reg_copy[keep]
+            scores_copy = scores_copy[keep]
 
-            scores = cls[i, :, 0]
             if nms:
-                keep = torchvision.ops.nms(reg_copy, scores, RPN_NMS_THRESHOLD)
+                keep = torchvision.ops.nms(reg_copy, scores_copy, RPN_NMS_THRESHOLD)
             else:
-                keep = torch.argsort(scores, descending=True)
+                keep = torch.argsort(scores_copy, descending=True)
             confidence[i] = cls[i][keep][:max_rois]
             bboxes.append(reg_copy[keep][:max_rois])
 
@@ -519,7 +526,6 @@ class RPN(nn.Module):
                         optimizer.step()
                         inner.set_postfix_str(' RPN Training Loss: {:.6f}'.format(np.mean(image_loss)))
                     inner.update()
-                    break
                 train_loss.append(np.mean(image_loss))
                 if val_data is not None:
                     val_data.reset_image_size()
@@ -737,7 +743,7 @@ class FasterRCNN(nn.Module):
 
     def alternate_training(self, train_data, image_batch_size=2, roi_batch_size=64,
                            epochs=1, lr=1e-4, momentum=0.99, val_data=None, shuffle=True,
-                           multi_scale=True, checkpoint_frequency=1, stage=None):
+                           multi_scale=True, stage=None):
 
         if stage is None:
             assert isinstance(image_batch_size, (list, tuple))
@@ -779,8 +785,7 @@ class FasterRCNN(nn.Module):
                                                 epochs=epochs,
                                                 val_data=val_data,
                                                 shuffle=shuffle,
-                                                multi_scale=multi_scale,
-                                                checkpoint_frequency=checkpoint_frequency)
+                                                multi_scale=multi_scale)
 
             self.save_model(self.name + '_{}.pkl'.format('stage_0'))
 
@@ -809,7 +814,7 @@ class FasterRCNN(nn.Module):
                                                       shuffle=shuffle,
                                                       multi_scale=multi_scale)
 
-            self.save_model(self.name + '_{}.pkl'.format('stage_1'))
+            # self.save_model(self.name + '_{}.pkl'.format('stage_1'))
 
             return train_loss, val_loss
 
@@ -827,8 +832,7 @@ class FasterRCNN(nn.Module):
                                                 epochs=epochs,
                                                 val_data=val_data,
                                                 shuffle=shuffle,
-                                                multi_scale=multi_scale,
-                                                checkpoint_frequency=checkpoint_frequency)
+                                                multi_scale=multi_scale)
 
             self.save_model(self.name + '_{}.pkl'.format('stage_2'))
 
@@ -980,7 +984,7 @@ class FasterRCNN(nn.Module):
                     inner.set_postfix_str(' RPN Training Loss: {:.6f},  FRCN Training Loss: {:.6f}'.format(train_loss[-1][0], train_loss[-1][1]))
 
             if epoch % checkpoint_frequency == 0:
-                self.save_model(self.name + '_joint_training_{}.pkl'.format(epoch))
+                self.save_model(self.name + '{}.pkl'.format(epoch))
 
         return train_loss, val_loss
 
