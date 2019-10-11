@@ -15,7 +15,7 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     predict = True
-    train = True
+    train = False
     joint = False
 
     faster_rcnn = FasterRCNN(name='FasterRCNN_Joint_Training',
@@ -91,39 +91,29 @@ def main():
                                        )
 
         else:
-            # epochs = [15, 30, 10, 10]
-            # image_batch_size = [1, 4, 1, 12]
-            # roi_batch_size = [128, 128, 128, 128]
-            #
-            # faster_rcnn.alternate_training(train_data=train_data,
-            #                                val_data=val_data,
-            #                                epochs=epochs,
-            #                                image_batch_size=image_batch_size,
-            #                                roi_batch_size=roi_batch_size,
-            #                                multi_scale=True,
-            #                                shuffle=True,
-            #                                stage=None)
-            faster_rcnn = pickle.load(open('models/FasterRCNN_Alternate_Training_stage_0.pkl', 'rb'))
+            epochs = [15, 30, 10, 10]
+            image_batch_size = [1, 4, 1, 12]
+            roi_batch_size = [128, 128, 128, 128]
 
             faster_rcnn.alternate_training(train_data=train_data,
-                                           val_data=None,
-                                           epochs=10,
-                                           image_batch_size=2,
-                                           roi_batch_size=128,
+                                           val_data=val_data,
+                                           epochs=epochs,
+                                           image_batch_size=image_batch_size,
+                                           roi_batch_size=roi_batch_size,
                                            multi_scale=True,
                                            shuffle=True,
-                                           stage=1)
+                                           stage=None)
 
     if predict:
         torch.random.manual_seed(12345)
         np.random.seed(12345)
 
-        faster_rcnn = pickle.load(open('models/FasterRCNN_Joint_Training_joint_training_4.pkl', 'rb'))
+        faster_rcnn = pickle.load(open('models/FasterRCNN_Alternate_Training_stage_3.pkl', 'rb'))
 
         faster_rcnn.predict(dataset=test_data,
-                            batch_size=6,
-                            confidence_threshold=0.5,
-                            overlap_threshold=0.2,
+                            batch_size=1,
+                            confidence_threshold=0.6,
+                            overlap_threshold=0.3,
                             show=True,
                             export=False
                             )
