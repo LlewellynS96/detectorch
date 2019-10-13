@@ -15,8 +15,8 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     predict = True
-    train = False
-    joint = False
+    train = True
+    joint = True
 
     faster_rcnn = FasterRCNN(name='FasterRCNN_Joint_Training',
                              anchors=[[45, 90], [64, 64], [90, 45],

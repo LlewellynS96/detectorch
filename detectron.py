@@ -47,8 +47,7 @@ class FastRCNN(nn.Module):
 
         self.features = self.model.features
         self.classifier = self.model.classifier
-        self.cls = nn.Sequential(nn.Linear(4096, self.num_classes + 1),
-                                 nn.Softmax(dim=-1))
+        self.cls = nn.Linear(4096, self.num_classes + 1)
         self.reg = nn.Linear(4096, self.num_classes * 4)
 
         self.to(device)
@@ -168,16 +167,16 @@ class FastRCNN(nn.Module):
 
         return train_loss, val_loss
 
-    @staticmethod
-    def loss(cls, reg, target_cls, target_reg, focal=False):
+    def loss(self, cls, reg, target_cls, target_reg, focal=True):
 
         loss = dict()
         lambd = 1. / cls.shape[0] / cls.shape[1]
 
+        target = torch.argmax(target_cls, dim=-1).flatten()
         if focal:
-            loss['cls'] = lambd * FocalLoss(reduction='sum')(cls, target_cls)
+            loss['cls'] = lambd * FocalLoss(reduction='sum')(cls.view(-1, self.num_classes + 1), target)
         else:
-            loss['cls'] = lambd * nn.BCELoss(reduction='sum')(cls, target_cls)
+            loss['cls'] = lambd * nn.CrossEntropyLoss(reduction='sum')(cls.view(-1, self.num_classes + 1), target)
 
         obj_mask = torch.nonzero(target_cls[:, :, 0] == 0)
         arange = torch.arange(len(obj_mask))
@@ -392,16 +391,16 @@ class RPN(nn.Module):
         reg = self.reg(features)
 
         cls = cls.permute(0, 2, 3, 1).reshape(batch_size, -1, 2)
-        cls = torch.softmax(cls, dim=-1)
         reg = reg.permute(0, 2, 3, 1).reshape(batch_size, -1, 4)
 
         return cls, reg
 
     def post_process(self, cls, reg, grid_size, max_rois=2000, nms=False):
         anchors = self.construct_anchors(grid_size)
+        cls = F.softmax(cls, dim=-1)
 
         batch_size = cls.shape[0]
-        confidence = torch.zeros(batch_size, max_rois, 2, device=self.device)
+        confidence = []
         bboxes = []
 
         for i in range(batch_size):
@@ -419,7 +418,7 @@ class RPN(nn.Module):
                 keep = torchvision.ops.nms(reg_copy, scores_copy, RPN_NMS_THRESHOLD)
             else:
                 keep = torch.argsort(scores_copy, descending=True)
-            confidence[i] = cls[i][keep][:max_rois]
+            confidence.append(cls[i][keep][:max_rois])
             bboxes.append(reg_copy[keep][:max_rois])
 
         return confidence, bboxes
@@ -538,16 +537,18 @@ class RPN(nn.Module):
         return train_loss, val_loss
 
     @staticmethod
-    def loss(cls, reg, target_cls, target_reg, focal=True):
+    def loss(cls, reg, target_cls, target_reg, focal=False):
 
         loss = dict()
+
+        target_cls = torch.argmax(target_cls, dim=-1)
 
         if focal:
             loss['cls'] = FocalLoss(reduction='mean')(cls, target_cls)
         else:
-            loss['cls'] = nn.BCELoss(reduction='mean')(cls, target_cls)
+            loss['cls'] = nn.CrossEntropyLoss(reduction='mean')(cls, target_cls)
 
-        obj_mask = torch.nonzero(target_cls[:, 0]).squeeze()
+        obj_mask = torch.nonzero(target_cls).squeeze()
         lambd = 1. / cls.shape[0]
         loss['reg'] = lambd * nn.SmoothL1Loss(reduction='sum')(reg[obj_mask],
                                                                target_reg[obj_mask])
