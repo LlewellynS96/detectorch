@@ -15,10 +15,10 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     predict = True
-    train = True
+    train = False
     joint = True
 
-    faster_rcnn = FasterRCNN(name='FasterRCNN_Joint_Training',
+    faster_rcnn = FasterRCNN(name='FasterRCNN',
                              anchors=[[45, 90], [64, 64], [90, 45],
                                       [90, 180], [128, 128], [180, 90],
                                       [180, 360], [256, 256], [360, 180],
@@ -72,22 +72,42 @@ def main():
                                    )
 
     if train:
-        # torch.random.manual_seed(12345)
-        # np.random.seed(12345)
+        torch.random.manual_seed(12345)
+        np.random.seed(12345)
         if joint:
-            plist = [{'params': faster_rcnn.rpn.parameters()},
-                     {'params': faster_rcnn.fast_rcnn.parameters()}]
-            optimizer = optim.SGD(plist, lr=1e-4, momentum=0.9, weight_decay=0.0005)
+            plist = [{'params': faster_rcnn.rpn.parameters(), 'lr': 1e-3},
+                     {'params': faster_rcnn.fast_rcnn.classifier.parameters(), 'lr': 1e-4},
+                     {'params': faster_rcnn.fast_rcnn.cls.parameters(), 'lr': 1e-4},
+                     {'params': faster_rcnn.fast_rcnn.reg.parameters(), 'lr': 1e-4},
+                     {'params': faster_rcnn.fast_rcnn.features.parameters(), 'lr': 1e-5}]
+            optimizer = optim.SGD(plist, momentum=0.9, weight_decay=5e-4, nesterov=True)
+
+            # target_lr = optimizer.defaults['lr']
+            # initial_lr = 1e-5
+            # warm_up = 5
+            # step_size = 0.98
+            # step_frequency = 1
+            # gradient = (target_lr - initial_lr) / warm_up
+            #
+            # def f(e):
+            #     if e < warm_up:
+            #         return gradient * e + initial_lr
+            #     else:
+            #         return target_lr * step_size ** ((e - warm_up) // step_frequency)
+            #
+            # scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=f)
 
             faster_rcnn.joint_training(train_data=train_data,
                                        val_data=val_data,
                                        optimizer=optimizer,
+                                       scheduler=None,
                                        max_rois=2000,
                                        image_batch_size=1,
                                        roi_batch_size=128,
-                                       epochs=1,
+                                       epochs=20,
                                        shuffle=True,
-                                       multi_scale=True
+                                       multi_scale=True,
+                                       checkpoint_frequency=5
                                        )
 
         else:
@@ -108,12 +128,12 @@ def main():
         torch.random.manual_seed(12345)
         np.random.seed(12345)
 
-        faster_rcnn = pickle.load(open('models/FasterRCNN_Alternate_Training_stage_3.pkl', 'rb'))
+        faster_rcnn = pickle.load(open('FasterRCNN10.pkl', 'rb'))
 
         faster_rcnn.predict(dataset=test_data,
                             batch_size=1,
-                            confidence_threshold=0.6,
-                            overlap_threshold=0.3,
+                            confidence_threshold=0.1,
+                            overlap_threshold=.45,
                             show=True,
                             export=False
                             )

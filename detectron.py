@@ -17,13 +17,13 @@ from layers import FocalLoss
 
 
 NETWORK_STRIDE = 16
-RPN_HI_THRESHOLD = 0.7
-RPN_LO_THRESHOLD = 0.3
+RPN_HI_THRESHOLD = 0.6
+RPN_LO_THRESHOLD = 0.25
 FRCN_HI_THRESHOLD = 0.5
-FRCN_LO_LO_THRESHOLD = 0.1
-FRCN_LO_HI_THRESHOLD = 0.3
+FRCN_LO_LO_THRESHOLD = 0.05
+FRCN_LO_HI_THRESHOLD = 0.25
 RPN_POS_RATIO = 0.5
-FRCN_POS_RATIO = 0.375
+FRCN_POS_RATIO = 0.5
 RPN_NMS_THRESHOLD = 0.7
 MAX_TRAIN_RPN_ROIS = 2000
 MAX_TEST_RPN_ROIS = 300
@@ -60,6 +60,7 @@ class FastRCNN(nn.Module):
             features = x
         grid_size = features.shape[-1]
         roi_features = ops.roi_pool(features, rois, output_size=(7, 7), spatial_scale=grid_size)
+        # roi_features = ops.roi_align(features, rois, output_size=(7, 7), spatial_scale=grid_size)
         classifier = self.classifier(roi_features.view(batch_size, -1, 512 * 7 * 7))
         cls = self.cls(classifier)
         reg = self.reg(classifier)
@@ -75,8 +76,8 @@ class FastRCNN(nn.Module):
         for param in self.features.parameters():
             param.requires_grad = False
 
-    def fit(self, train_data, optimizer, backbone=None, rpn=None, rois=None, max_rois=2000, image_batch_size=2,
-            roi_batch_size=32, epochs=1, val_data=None, shuffle=True, multi_scale=True):
+    def fit(self, train_data, optimizer, scheduler=None, backbone=None, rpn=None, rois=None, max_rois=2000,
+            image_batch_size=2, roi_batch_size=32, epochs=1, val_data=None, shuffle=True, multi_scale=True):
 
         assert rpn or rois
 
@@ -162,8 +163,14 @@ class FastRCNN(nn.Module):
                     val_loss.append(self.calculate_loss(val_data, backbone, rpn, 128))
                     inner.set_postfix_str(' FRCN Training Loss: {:.6f},  FRCN Validation Loss: {:.6f}'
                                           .format(train_loss[-1], val_loss[-1]))
+                    with open('loss_frcn.txt', 'a') as fl:
+                        fl.writelines('FRCN Training Loss: {:.6f},  '
+                                      'FRCN Validation Loss: {:.6f}\n'.format(train_loss[-1],
+                                                                              val_loss[-1]))
                 else:
                     inner.set_postfix_str(' FRCN Training Loss: {:.6f}'.format(train_loss[-1]))
+            if scheduler is not None:
+                scheduler.step()
 
         return train_loss, val_loss
 
@@ -281,24 +288,24 @@ class FastRCNN(nn.Module):
 
     def post_process(self, cls, reg, rois):
         batch_size = cls.shape[0]
+        cls = F.softmax(cls, dim=-1)
 
         classes = []
         bboxes = []
 
         for i in range(batch_size):
-            cls_argmax = torch.argmax(cls[i], dim=-1) - 1.
-            mask = cls_argmax >= 0
-            cls_argmax = cls_argmax[mask]
-            cls_copy = cls[i][mask]
+            cls_argmax = torch.argmax(cls[i, :, 1:], dim=-1)
+            cls_copy = cls[i]
             arange = torch.arange(len(cls_copy))
-            reg_copy = reg[i][mask][arange, cls_argmax]
-            rois_copy = rois[i][mask]
+            reg_copy = reg[i][arange, cls_argmax]
+            rois_copy = rois[i]
 
             if reg_copy.numel() > 0:
                 reg_copy = deparameterize_bboxes(reg_copy, rois_copy)
                 reg_copy = torch.clamp(reg_copy, min=0., max=1.)
 
                 scores = cls_copy[:, 0]
+                cls_copy[:, 0] = 0.
                 sort = torch.argsort(scores, descending=True)
                 classes.append(cls_copy[sort])
                 bboxes.append(reg_copy[sort])
@@ -461,7 +468,7 @@ class RPN(nn.Module):
 
         return keep.squeeze()
 
-    def fit(self, train_data, backbone, optimizer, batch_size=64, epochs=1,
+    def fit(self, train_data, backbone, optimizer, scheduler=None, batch_size=64, epochs=1,
             val_data=None, shuffle=True, multi_scale=True):
 
         self.train()
@@ -531,13 +538,19 @@ class RPN(nn.Module):
                     val_loss.append(self.calculate_loss(val_data, backbone, batch_size))
                     inner.set_postfix_str(' RPN Training Loss: {:.6f},  RPN Validation Loss: {:.6f}'
                                           .format(train_loss[-1], val_loss[-1]))
+                    with open('loss_rpn.txt', 'a') as fl:
+                        fl.writelines('RPN Training Loss: {:.6f},  '
+                                      'RPN Validation Loss: {:.6f}\n'.format(train_loss[-1],
+                                                                             val_loss[-1]))
                 else:
                     inner.set_postfix_str(' RPN Training Loss: {:.6f}'.format(train_loss[-1]))
+            if scheduler is not None:
+                scheduler.step()
 
         return train_loss, val_loss
 
     @staticmethod
-    def loss(cls, reg, target_cls, target_reg, focal=False):
+    def loss(cls, reg, target_cls, target_reg, focal=True):
 
         loss = dict()
 
@@ -778,10 +791,26 @@ class FasterRCNN(nn.Module):
                      ]
             optimizer = optim.SGD(plist, lr=lr, momentum=momentum, weight_decay=5e-4)
 
+            target_lr = lr
+            initial_lr = 1e-5
+            warm_up = 3
+            step_size = 0.9
+            step_frequency = 1
+            gradient = (target_lr - initial_lr) / warm_up
+
+            def f(e):
+                if e < warm_up:
+                    return gradient * e + initial_lr
+                else:
+                    return target_lr * step_size ** ((e - warm_up) // step_frequency)
+
+            scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=f)
+
             self.fast_rcnn.train()
             train_loss, val_loss = self.rpn.fit(train_data=train_data,
                                                 backbone=self.fast_rcnn.features,
                                                 optimizer=optimizer,
+                                                scheduler=scheduler,
                                                 batch_size=roi_batch_size,
                                                 epochs=epochs,
                                                 val_data=val_data,
@@ -801,6 +830,21 @@ class FasterRCNN(nn.Module):
                                       device=self.device)
             plist = [{'params': self.fast_rcnn.parameters()}]
             optimizer = optim.SGD(plist, lr=lr, momentum=momentum, weight_decay=5e-4)
+
+            target_lr = lr
+            initial_lr = 1e-5
+            warm_up = 3
+            step_size = 0.9
+            step_frequency = 1
+            gradient = (target_lr - initial_lr) / warm_up
+
+            def f(e):
+                if e < warm_up:
+                    return gradient * e + initial_lr
+                else:
+                    return target_lr * step_size ** ((e - warm_up) // step_frequency)
+
+            scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=f)
 
             self.rpn.eval()
             train_loss, val_loss = self.fast_rcnn.fit(train_data=train_data,
@@ -824,6 +868,21 @@ class FasterRCNN(nn.Module):
             plist = [{'params': self.rpn.parameters()}]
             optimizer = optim.SGD(plist, lr=lr, momentum=momentum, weight_decay=5e-4)
 
+            target_lr = lr
+            initial_lr = 1e-5
+            warm_up = 3
+            step_size = 0.9
+            step_frequency = 1
+            gradient = (target_lr - initial_lr) / warm_up
+
+            def f(e):
+                if e < warm_up:
+                    return gradient * e + initial_lr
+                else:
+                    return target_lr * step_size ** ((e - warm_up) // step_frequency)
+
+            scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=f)
+
             self.fast_rcnn.eval()
             self.fast_rcnn.freeze()
             train_loss, val_loss = self.rpn.fit(train_data=train_data,
@@ -846,6 +905,21 @@ class FasterRCNN(nn.Module):
                      {'params': self.fast_rcnn.reg.parameters()}]
             optimizer = optim.SGD(plist, lr=lr, momentum=momentum, weight_decay=5e-4)
 
+            target_lr = lr
+            initial_lr = 1e-5
+            warm_up = 3
+            step_size = 0.9
+            step_frequency = 1
+            gradient = (target_lr - initial_lr) / warm_up
+
+            def f(e):
+                if e < warm_up:
+                    return gradient * e + initial_lr
+                else:
+                    return target_lr * step_size ** ((e - warm_up) // step_frequency)
+
+            scheduler = optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=f)
+
             self.rpn.eval()
             self.fast_rcnn.freeze()
             train_loss, val_loss = self.fast_rcnn.fit(train_data=train_data,
@@ -864,7 +938,7 @@ class FasterRCNN(nn.Module):
 
             return train_loss, val_loss
 
-    def joint_training(self, train_data, optimizer, max_rois=2000, image_batch_size=2,
+    def joint_training(self, train_data, optimizer, scheduler=None, max_rois=2000, image_batch_size=2,
                        roi_batch_size=32, epochs=1, val_data=None, shuffle=True, multi_scale=True, checkpoint_frequency=100):
 
         self.train()
@@ -963,7 +1037,7 @@ class FasterRCNN(nn.Module):
                             frcn_target_classes[i][:frcn_pos_numel] = image_classes[argmax_iou[samples[:frcn_pos_numel]]]
                             frcn_target_classes[i][frcn_pos_numel:, 0] = 1.
                             target_bboxes[i] = parameterize_bboxes(image_bboxes[argmax_iou[samples]], rois[samples])
-                    cls, reg = self.fast_rcnn(images, frcn_target_rois)
+                    cls, reg = self.fast_rcnn(features[i, None], frcn_target_rois, extract_features=False)
                     loss = self.fast_rcnn.loss(cls, reg, frcn_target_classes.detach(), target_bboxes.detach())
                     frcn_loss.append(loss['total'].item())
                     loss['total'].backward()
@@ -981,9 +1055,18 @@ class FasterRCNN(nn.Module):
                                                                                 train_loss[-1][1],
                                                                                 val_loss[-1][0],
                                                                                 val_loss[-1][1]))
+                    with open('loss_joint.txt', 'a') as fl:
+                        fl.writelines('RPN Training Loss: {:.6f},  '
+                                      'FRCN Training Loss: {:.6f},  '
+                                      'RPN Validation Loss: {:.6f},  '
+                                      'FRCN Validation Loss: {:.6f}\n'.format(train_loss[-1][0],
+                                                                              train_loss[-1][1],
+                                                                              val_loss[-1][0],
+                                                                              val_loss[-1][1]))
                 else:
                     inner.set_postfix_str(' RPN Training Loss: {:.6f},  FRCN Training Loss: {:.6f}'.format(train_loss[-1][0], train_loss[-1][1]))
-
+            if scheduler is not None:
+                scheduler.step()
             if epoch % checkpoint_frequency == 0:
                 self.save_model(self.name + '{}.pkl'.format(epoch))
 
