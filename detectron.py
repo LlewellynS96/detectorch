@@ -17,11 +17,11 @@ from layers import FocalLoss
 
 
 NETWORK_STRIDE = 16
-RPN_HI_THRESHOLD = 0.6
-RPN_LO_THRESHOLD = 0.25
+RPN_HI_THRESHOLD = 0.7
+RPN_LO_THRESHOLD = 0.3
 FRCN_HI_THRESHOLD = 0.5
-FRCN_LO_LO_THRESHOLD = 0.05
-FRCN_LO_HI_THRESHOLD = 0.25
+FRCN_LO_LO_THRESHOLD = 0.
+FRCN_LO_HI_THRESHOLD = 0.5
 RPN_POS_RATIO = 0.5
 FRCN_POS_RATIO = 0.5
 RPN_NMS_THRESHOLD = 0.7
@@ -174,7 +174,7 @@ class FastRCNN(nn.Module):
 
         return train_loss, val_loss
 
-    def loss(self, cls, reg, target_cls, target_reg, focal=True):
+    def loss(self, cls, reg, target_cls, target_reg, focal=False):
 
         loss = dict()
         lambd = 1. / cls.shape[0] / cls.shape[1]
@@ -529,6 +529,7 @@ class RPN(nn.Module):
                         loss = self.loss(cls, reg, target_cls, target_reg)
                         image_loss.append(loss['total'].item())
                         loss['total'].backward()
+                        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1., norm_type='inf')
                         optimizer.step()
                         inner.set_postfix_str(' RPN Training Loss: {:.6f}'.format(np.mean(image_loss)))
                     inner.update()
@@ -550,7 +551,7 @@ class RPN(nn.Module):
         return train_loss, val_loss
 
     @staticmethod
-    def loss(cls, reg, target_cls, target_reg, focal=True):
+    def loss(cls, reg, target_cls, target_reg, focal=False):
 
         loss = dict()
 
@@ -562,8 +563,7 @@ class RPN(nn.Module):
             loss['cls'] = nn.CrossEntropyLoss(reduction='mean')(cls, target_cls)
 
         obj_mask = torch.nonzero(target_cls).squeeze()
-        lambd = 1. / cls.shape[0]
-        loss['reg'] = lambd * nn.SmoothL1Loss(reduction='sum')(reg[obj_mask],
+        loss['reg'] = nn.SmoothL1Loss(reduction='mean')(reg[obj_mask],
                                                                target_reg[obj_mask])
 
         loss['total'] = loss['cls'] + loss['reg']
@@ -756,7 +756,7 @@ class FasterRCNN(nn.Module):
                        torch.tensor([], device=self.device)
 
     def alternate_training(self, train_data, image_batch_size=2, roi_batch_size=64,
-                           epochs=1, lr=1e-4, momentum=0.99, val_data=None, shuffle=True,
+                           epochs=1, lr=1e-2, momentum=0.9, val_data=None, shuffle=True,
                            multi_scale=True, stage=None):
 
         if stage is None:
@@ -789,12 +789,12 @@ class FasterRCNN(nn.Module):
             plist = [{'params': self.fast_rcnn.features.parameters()},
                      {'params': self.rpn.parameters()}
                      ]
-            optimizer = optim.SGD(plist, lr=lr, momentum=momentum, weight_decay=5e-4)
+            optimizer = optim.SGD(plist, lr=lr, momentum=momentum, weight_decay=1e-4)
 
             target_lr = lr
-            initial_lr = 1e-5
+            initial_lr = 1e-2
             warm_up = 3
-            step_size = 0.9
+            step_size = 0.95
             step_frequency = 1
             gradient = (target_lr - initial_lr) / warm_up
 
@@ -1041,6 +1041,7 @@ class FasterRCNN(nn.Module):
                     loss = self.fast_rcnn.loss(cls, reg, frcn_target_classes.detach(), target_bboxes.detach())
                     frcn_loss.append(loss['total'].item())
                     loss['total'].backward()
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1., norm_type='inf')
                     optimizer.step()
                     inner.set_postfix_str(' RPN Training Loss: {:.6f},  FRCN Training Loss: {:.6f}'.format(np.mean(rpn_loss), np.mean(frcn_loss)))
                     inner.update()
