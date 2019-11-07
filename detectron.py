@@ -17,16 +17,17 @@ from layers import FocalLoss
 
 
 NETWORK_STRIDE = 16
-RPN_HI_THRESHOLD = 0.7
-RPN_LO_THRESHOLD = 0.3
+RPN_HI_THRESHOLD = 0.6
+RPN_LO_THRESHOLD = 0.25
 FRCN_HI_THRESHOLD = 0.5
-FRCN_LO_LO_THRESHOLD = 0.
+FRCN_LO_LO_THRESHOLD = 0.1
 FRCN_LO_HI_THRESHOLD = 0.5
 RPN_POS_RATIO = 0.5
-FRCN_POS_RATIO = 0.5
+FRCN_POS_RATIO = 0.25
 RPN_NMS_THRESHOLD = 0.7
-MAX_TRAIN_RPN_ROIS = 2000
+MAX_TRAIN_RPN_ROIS = 3000
 MAX_TEST_RPN_ROIS = 300
+MULTI_SCALE_FREQ = 10
 
 
 class FastRCNN(nn.Module):
@@ -174,7 +175,7 @@ class FastRCNN(nn.Module):
 
         return train_loss, val_loss
 
-    def loss(self, cls, reg, target_cls, target_reg, focal=False):
+    def loss(self, cls, reg, target_cls, target_reg, focal=True):
 
         loss = dict()
         lambd = 1. / cls.shape[0] / cls.shape[1]
@@ -411,7 +412,7 @@ class RPN(nn.Module):
         bboxes = []
 
         for i in range(batch_size):
-            scores_copy = cls[i, :, 0]
+            scores_copy = cls[i, :]
             reg_copy = deparameterize_bboxes(reg[i], anchors)
             reg_copy = torch.clamp(reg_copy, min=0., max=1.)
             keep = np.nonzero(reg_copy[:, 2] - reg_copy[:, 0]).squeeze()
@@ -422,10 +423,10 @@ class RPN(nn.Module):
             scores_copy = scores_copy[keep]
 
             if nms:
-                keep = torchvision.ops.nms(reg_copy, scores_copy, RPN_NMS_THRESHOLD)
+                keep = torchvision.ops.nms(reg_copy, scores_copy[:, 0], RPN_NMS_THRESHOLD)
             else:
-                keep = torch.argsort(scores_copy, descending=True)
-            confidence.append(cls[i][keep][:max_rois])
+                keep = torch.argsort(scores_copy[:, 0], descending=True)
+            confidence.append(scores_copy[keep][:max_rois])
             bboxes.append(reg_copy[keep][:max_rois])
 
         return confidence, bboxes
@@ -483,9 +484,6 @@ class RPN(nn.Module):
 
         for epoch in range(1, epochs + 1):
             image_loss = []
-            if multi_scale:
-                random_size = np.random.randint(49, 52) * NETWORK_STRIDE
-                train_data.set_image_size(random_size, random_size)
             with tqdm(total=len(train_dataloader),
                       desc='Epoch: [{}/{}]'.format(epoch, epochs),
                       leave=True,
@@ -529,29 +527,30 @@ class RPN(nn.Module):
                         loss = self.loss(cls, reg, target_cls, target_reg)
                         image_loss.append(loss['total'].item())
                         loss['total'].backward()
-                        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1., norm_type='inf')
+                        torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=.5, norm_type='inf')
                         optimizer.step()
                         inner.set_postfix_str(' RPN Training Loss: {:.6f}'.format(np.mean(image_loss)))
                     inner.update()
+                    if inner.n % MULTI_SCALE_FREQ == 0 and multi_scale:
+                        random_size = np.random.randint(49, 52) * NETWORK_STRIDE
+                        train_data.set_image_size(random_size, random_size)
                 train_loss.append(np.mean(image_loss))
                 if val_data is not None:
                     val_data.reset_image_size()
                     val_loss.append(self.calculate_loss(val_data, backbone, batch_size))
                     inner.set_postfix_str(' RPN Training Loss: {:.6f},  RPN Validation Loss: {:.6f}'
                                           .format(train_loss[-1], val_loss[-1]))
-                    with open('loss_rpn.txt', 'a') as fl:
-                        fl.writelines('RPN Training Loss: {:.6f},  '
-                                      'RPN Validation Loss: {:.6f}\n'.format(train_loss[-1],
-                                                                             val_loss[-1]))
                 else:
                     inner.set_postfix_str(' RPN Training Loss: {:.6f}'.format(train_loss[-1]))
+                with open('loss_rpn.txt', 'a') as fl:
+                    fl.writelines('RPN Training Loss: {:.6f}\n'.format(train_loss[-1]))
             if scheduler is not None:
                 scheduler.step()
 
         return train_loss, val_loss
 
     @staticmethod
-    def loss(cls, reg, target_cls, target_reg, focal=False):
+    def loss(cls, reg, target_cls, target_reg, focal=True):
 
         loss = dict()
 
@@ -563,8 +562,8 @@ class RPN(nn.Module):
             loss['cls'] = nn.CrossEntropyLoss(reduction='mean')(cls, target_cls)
 
         obj_mask = torch.nonzero(target_cls).squeeze()
-        loss['reg'] = nn.SmoothL1Loss(reduction='mean')(reg[obj_mask],
-                                                               target_reg[obj_mask])
+        loss['reg'] = 4. * nn.SmoothL1Loss(reduction='mean')(reg[obj_mask],
+                                                             target_reg[obj_mask])
 
         loss['total'] = loss['cls'] + loss['reg']
         return loss
@@ -756,7 +755,7 @@ class FasterRCNN(nn.Module):
                        torch.tensor([], device=self.device)
 
     def alternate_training(self, train_data, image_batch_size=2, roi_batch_size=64,
-                           epochs=1, lr=1e-2, momentum=0.9, val_data=None, shuffle=True,
+                           epochs=1, lr=1e-1, momentum=0.9, val_data=None, shuffle=True,
                            multi_scale=True, stage=None):
 
         if stage is None:
@@ -774,6 +773,7 @@ class FasterRCNN(nn.Module):
                 loss = self.alternate_training(train_data=train_data,
                                                val_data=val_data,
                                                epochs=epochs[i],
+                                               lr=lr,
                                                image_batch_size=image_batch_size[i],
                                                roi_batch_size=roi_batch_size[i],
                                                multi_scale=multi_scale,
@@ -829,12 +829,12 @@ class FasterRCNN(nn.Module):
                                       model_path=self.model_path,
                                       device=self.device)
             plist = [{'params': self.fast_rcnn.parameters()}]
-            optimizer = optim.SGD(plist, lr=lr, momentum=momentum, weight_decay=5e-4)
+            optimizer = optim.SGD(plist, lr=lr, momentum=momentum, weight_decay=1e-4)
 
             target_lr = lr
-            initial_lr = 1e-5
+            initial_lr = 1e-2
             warm_up = 3
-            step_size = 0.9
+            step_size = 0.95
             step_frequency = 1
             gradient = (target_lr - initial_lr) / warm_up
 
@@ -849,6 +849,7 @@ class FasterRCNN(nn.Module):
             self.rpn.eval()
             train_loss, val_loss = self.fast_rcnn.fit(train_data=train_data,
                                                       optimizer=optimizer,
+                                                      scheduler=scheduler,
                                                       backbone=backbone,
                                                       rpn=self.rpn,
                                                       max_rois=MAX_TRAIN_RPN_ROIS,
@@ -866,12 +867,12 @@ class FasterRCNN(nn.Module):
         elif stage == 2:
 
             plist = [{'params': self.rpn.parameters()}]
-            optimizer = optim.SGD(plist, lr=lr, momentum=momentum, weight_decay=5e-4)
+            optimizer = optim.SGD(plist, lr=lr, momentum=momentum, weight_decay=1e-4)
 
             target_lr = lr
-            initial_lr = 1e-5
+            initial_lr = 1e-2
             warm_up = 3
-            step_size = 0.9
+            step_size = 0.95
             step_frequency = 1
             gradient = (target_lr - initial_lr) / warm_up
 
@@ -888,6 +889,7 @@ class FasterRCNN(nn.Module):
             train_loss, val_loss = self.rpn.fit(train_data=train_data,
                                                 backbone=self.fast_rcnn.features,
                                                 optimizer=optimizer,
+                                                scheduler=scheduler,
                                                 batch_size=roi_batch_size,
                                                 epochs=epochs,
                                                 val_data=val_data,
@@ -906,7 +908,7 @@ class FasterRCNN(nn.Module):
             optimizer = optim.SGD(plist, lr=lr, momentum=momentum, weight_decay=5e-4)
 
             target_lr = lr
-            initial_lr = 1e-5
+            initial_lr = 1e-2
             warm_up = 3
             step_size = 0.9
             step_frequency = 1
@@ -924,6 +926,7 @@ class FasterRCNN(nn.Module):
             self.fast_rcnn.freeze()
             train_loss, val_loss = self.fast_rcnn.fit(train_data=train_data,
                                                       optimizer=optimizer,
+                                                      scheduler=scheduler,
                                                       backbone=self.fast_rcnn.features,
                                                       rpn=self.rpn,
                                                       max_rois=MAX_TRAIN_RPN_ROIS,
@@ -954,9 +957,6 @@ class FasterRCNN(nn.Module):
         for epoch in range(1, epochs + 1):
             rpn_loss = []
             frcn_loss = []
-            if multi_scale:
-                random_size = np.random.randint(49, 52) * NETWORK_STRIDE
-                train_data.set_image_size(random_size, random_size)
             with tqdm(total=len(train_dataloader),
                       desc='Epoch: [{}/{}]'.format(epoch, epochs),
                       leave=True,
@@ -1041,10 +1041,13 @@ class FasterRCNN(nn.Module):
                     loss = self.fast_rcnn.loss(cls, reg, frcn_target_classes.detach(), target_bboxes.detach())
                     frcn_loss.append(loss['total'].item())
                     loss['total'].backward()
-                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1., norm_type='inf')
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=.5, norm_type='inf')
                     optimizer.step()
                     inner.set_postfix_str(' RPN Training Loss: {:.6f},  FRCN Training Loss: {:.6f}'.format(np.mean(rpn_loss), np.mean(frcn_loss)))
                     inner.update()
+                    if inner.n % MULTI_SCALE_FREQ == 0 and multi_scale:
+                        random_size = np.random.randint(49, 52) * NETWORK_STRIDE
+                        train_data.set_image_size(random_size, random_size)
                 train_loss.append([np.mean(rpn_loss), np.mean(frcn_loss)])
                 if val_data is not None:
                     val_data.reset_image_size()
@@ -1056,16 +1059,12 @@ class FasterRCNN(nn.Module):
                                                                                 train_loss[-1][1],
                                                                                 val_loss[-1][0],
                                                                                 val_loss[-1][1]))
-                    with open('loss_joint.txt', 'a') as fl:
-                        fl.writelines('RPN Training Loss: {:.6f},  '
-                                      'FRCN Training Loss: {:.6f},  '
-                                      'RPN Validation Loss: {:.6f},  '
-                                      'FRCN Validation Loss: {:.6f}\n'.format(train_loss[-1][0],
-                                                                              train_loss[-1][1],
-                                                                              val_loss[-1][0],
-                                                                              val_loss[-1][1]))
                 else:
                     inner.set_postfix_str(' RPN Training Loss: {:.6f},  FRCN Training Loss: {:.6f}'.format(train_loss[-1][0], train_loss[-1][1]))
+            with open('loss_joint.txt', 'a') as fl:
+                fl.writelines('RPN Training Loss: {:.6f},  '
+                              'FRCN Training Loss: {:.6f}\n'.format(train_loss[-1][0],
+                                                                    train_loss[-1][1]))
             if scheduler is not None:
                 scheduler.step()
             if epoch % checkpoint_frequency == 0:
