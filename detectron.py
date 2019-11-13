@@ -506,7 +506,6 @@ class RPN(nn.Module):
                         cls = cls[0][valid]
                         reg = reg[0][valid]
                         anchors = anchors[valid]
-                        reg = deparameterize_bboxes(reg, anchors)
                         ious = jaccard(anchors, target_bboxes)
                         max_iou, argmax_iou = torch.max(ious, dim=1)
                         positive_mask = max_iou > RPN_HI_THRESHOLD
@@ -525,7 +524,7 @@ class RPN(nn.Module):
                         target_bboxes = target_bboxes[argmax_iou][target_anchors]
                         target_reg = parameterize_bboxes(target_bboxes, anchors[target_anchors])
                         cls = cls[target_anchors]
-                        reg = parameterize_bboxes(reg[target_anchors], anchors[target_anchors])
+                        reg = reg[target_anchors]
                         loss = self.loss(cls, reg, target_cls, target_reg)
                         image_loss.append(loss['total'].item())
                         loss['total'].backward()
