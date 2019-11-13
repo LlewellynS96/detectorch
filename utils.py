@@ -3,11 +3,15 @@ import cv2
 import numpy as np
 import xml.etree.ElementTree as Et
 import torch
+import csv
 
 
 NUM_WORKERS = 0
-VGG_MEAN = [0.485, 0.456, 0.406]
-VGG_STD = [0.229, 0.224, 0.225]
+VGG_MEAN = [0.458, 0.438, 0.405]
+VGG_STD = [0.247, 0.242, 0.248]
+
+SS_MEAN = [0.174, 0.632, 0.506]
+SS_STD = [0.111, 0.072, 0.075]
 
 
 def read_classes(file):
@@ -32,7 +36,7 @@ def read_classes(file):
     return classes
 
 
-def get_annotations(annotations_dir, img):
+def get_pascal_annotations(annotations_dir, img):
     """
     Collects all the annotations for a specific image in any of the
     Pascal VOC datasets.
@@ -75,6 +79,40 @@ def get_annotations(annotations_dir, img):
         ymin = (float(bbox.find('ymin').text) - 1.) / height
         ymax = (float(bbox.find('ymax').text) - 1.) / height
         annotations.append((name, xmin, ymin, xmax, ymax, truncated, difficult))
+
+    return annotations
+
+
+def get_ss_annotations(annotations_dir, img):
+    file = os.path.join(annotations_dir, img + '.csv')
+    rows = []
+
+    with open(file, mode='r') as csv_file:
+        csv_reader = csv.DictReader(csv_file)
+        line_count = 0
+        for row in csv_reader:
+            if line_count != 0:
+                rows.append(row)
+            line_count += 1
+
+    annotations = []
+
+    for obj in rows:
+        signal_type = obj['signal_type']
+        truncated = obj['truncated']
+        xmin = float(obj['xmin'])
+        ymin = float(obj['ymin'])
+        xmax = float(obj['xmax'])
+        ymax = float(obj['ymax'])
+        snr = float(obj['snr'])
+        max_overlap = float(obj['max_overlap'])
+        if snr < 0:
+            difficult = True
+        elif max_overlap > 0.5:
+            difficult = True
+        else:
+            difficult = False
+        annotations.append((signal_type, xmin, ymin, xmax, ymax, truncated, difficult))
 
     return annotations
 
