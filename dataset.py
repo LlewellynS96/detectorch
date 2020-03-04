@@ -14,7 +14,7 @@ class PascalDatasetImage(Dataset):
     from a PASCAL VOC dataset in a general format that is compatible with
     any arbitrary object detector.
     """
-    def __init__(self, classes, root_dir='data/VOC2012/', dataset='train', skip_truncated=True,
+    def __init__(self, classes, mu, sigma, root_dir='data/VOC2012/', dataset='train', skip_truncated=True,
                  do_transforms=False, skip_difficult=True, image_size=(416, 416)):
         """
         Initialise the dataset object with some network and dataset specific parameters.
@@ -51,6 +51,9 @@ class PascalDatasetImage(Dataset):
         assert dataset in ['train', 'val', 'trainval', 'test']
 
         self.num_classes = len(self.classes)
+
+        self.mu = mu
+        self.sigma = sigma
 
         self.root_dir = root_dir
         self.images_dir = os.path.join(self.root_dir, 'JPEGImages/')
