@@ -205,18 +205,20 @@ if __name__ == '__main__':
            'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor']
     mean_ap = []
     for cl in cls:
-        rec, prec, ap = voc_eval(detpath='./YOLOv2-tiny_det_test_{}.txt',
-                                 annopath='../../data/VOC2007/Annotations/{}.xml',
-                                 imagesetfile='../../data/VOC2007/ImageSets/Main/test.txt',
+        rec, prec, ap = voc_eval(#detpath='./comp4_det_test_{}.txt',
+                                 detpath='./FasterRCNN_det_test_{}.txt',
+                                 annopath='../../../../Data/VOCdevkit/VOC2007/Annotations/{}.xml',
+                                 imagesetfile='../../../../Data/VOCdevkit/VOC2007/ImageSets/Main/test.txt',
                                  classname=cl,
                                  cachedir='.',
                                  ovthresh=0.5,
                                  use_07_metric=False)
         mean_ap.append(ap)
-        plt.plot(rec, prec)
-        plt.xlabel('Recall')
-        plt.ylabel('Precision')
-        plt.xlim(0., 1.)
-        plt.ylim(0., 1.)
-        plt.show()
+        print(ap)
+        # plt.plot(rec, prec)
+        # plt.xlabel('Recall')
+        # plt.ylabel('Precision')
+        # plt.xlim(0., 1.)
+        # plt.ylim(0., 1.)
+        # plt.show()
     print(np.mean(mean_ap))

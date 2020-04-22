@@ -89,11 +89,8 @@ def get_ss_annotations(annotations_dir, img):
 
     with open(file, mode='r') as csv_file:
         csv_reader = csv.DictReader(csv_file)
-        line_count = 0
         for row in csv_reader:
-            if line_count != 0:
-                rows.append(row)
-            line_count += 1
+            rows.append(row)
 
     annotations = []
 
@@ -168,12 +165,7 @@ def add_bbox_to_image(image, bbox, confidence, cls):
         value will be displayed as part of the label.
     """
     text = '{} {:.2f}'.format(cls, confidence)
-    height, width = image.shape[:2]
     xmin, ymin, xmax, ymax = bbox
-    xmin *= width
-    xmax *= width
-    ymin *= height
-    ymax *= height
     # Draw a bounding box.
     color = np.random.uniform(0., 255., size=3)
     cv2.rectangle(image, (xmin, ymax), (xmax, ymin), color, 3)
@@ -198,23 +190,23 @@ def jaccard(boxes_a, boxes_b):
     Parameters
     ----------
         boxes_a : Tensor
-            A Tensor whose shape is :math:`(N, 4)`. :math:`N` is the number
+            An array whose shape is :math:`(N, 4)`. :math:`N` is the number
             of bounding boxes. The dtype should be :obj:`float`.
         boxes_b : Tensor
-            A Tensor similar to :obj:`bbox_a`, whose shape is :math:`(K, 4)`.
+            An array similar to :obj:`bbox_a`, whose shape is :math:`(K, 4)`.
             The dtype should be :obj:`float`.
     Returns
     -------
         Tensor
-            A Tensor whose shape is :math:`(N, K)`. An element at index :math:`(n, k)`
+            An array whose shape is :math:`(N, K)`. An element at index :math:`(n, k)`
             contains IoUs between :math:`n` th bounding box in :obj:`bbox_a` and
             :math:`k` th bounding box in :obj:`bbox_b`.
     Notes
     -----
         from: https://github.com/chainer/chainercv
     """
-    assert boxes_a.shape[-1] == 4
-    assert boxes_b.shape[-1] == 4
+    assert boxes_a.shape[1] == 4
+    assert boxes_b.shape[1] == 4
     assert isinstance(boxes_a, torch.Tensor)
     assert isinstance(boxes_b, torch.Tensor)
 
@@ -227,14 +219,15 @@ def jaccard(boxes_a, boxes_b):
     en = (tl < br).type(tl.type()).prod(dim=2)
     area_i = torch.prod(br - tl, 2) * en
 
-    area_a = torch.clamp(area_a, min=0)
+    # area_a = torch.clamp(area_a, min=0)
 
     ious = area_i / (area_a[:, None] + area_b - area_i)
+    ious[torch.isnan(ious)] = 0.
 
     return ious
 
 
-def index_dict_list(dictionary, index):
+def access_dict_list(dictionary, index):
     """
     Returns the items at a specified index in a dictionary
     as a dictionary. This is used to convert a dictionary of
@@ -486,14 +479,27 @@ def export_prediction(cls, image_id, top, left, bottom, right, confidence,
     filename = os.path.join(directory, filename)
 
     with open(filename, 'a') as f:
-        top = np.maximum(top, 1.)
-        left = np.maximum(left, 1.)
-        bottom = np.maximum(bottom, 1.)
-        right = np.maximum(right, 1.)
         prediction = [image_id, confidence, np.round(left), np.round(top), np.round(right), np.round(bottom), '\n']
         prediction = map(to_repr, prediction)
         prediction = ' '.join(prediction)
         f.write(prediction)
+
+
+def get_trainable_parameters(module):
+    """
+    Returns a list of a model's trainable parameters by checking which
+    parameters are tracking their gradients.
+    Returns
+    -------
+    list
+        A list containing the trainable parameters.
+    """
+    trainable_parameters = []
+    for param in module.parameters():
+        if param.requires_grad:
+            trainable_parameters.append(param)
+
+    return trainable_parameters
 
 
 class nullcontext:

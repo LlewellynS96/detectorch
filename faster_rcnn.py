@@ -3,9 +3,10 @@ import torch.optim as optim
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
-from detectron import FastRCNN, FasterRCNN, RPN
+from detectron import FastRCNN, FasterRCNN, RPN, VGGBackbone
 from dataset import PascalDatasetImage
-from utils import to_numpy_image, add_bbox_to_image, index_dict_list, jaccard
+from torchvision import models
+from utils import to_numpy_image, add_bbox_to_image, access_dict_list, jaccard
 
 
 def main():
@@ -15,31 +16,36 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
     predict = True
-    train = True
+    train = False
     joint = True
 
-    # faster_rcnn = FasterRCNN(name='FasterRCNN',
-    #                          anchors=[[45, 90], [64, 64], [90, 45],
-    #                                   [90, 180], [128, 128], [180, 90],
-    #                                   [180, 360], [256, 256], [360, 180],
-    #                                   [360, 720], [512, 512], [720, 360]],
-    #                          model_path='models/vgg16-397923af.pth',
-    #                          device=device)
+    VGG = VGGBackbone(model=models.vgg11_bn(),
+                      model_path='models/vgg11_bn-6002323d.pth',
+                      device=device)
+
     faster_rcnn = FasterRCNN(name='FasterRCNN',
-                             anchors=[[123.4950, 100.2833],
-                                      [212.2724, 189.5562],
-                                      [365.2326, 410.2795],
-                                      [215.3095, 351.9713],
-                                      [232.9199, 590.1595],
-                                      [435.3557, 659.2862],
-                                      [64.1715, 175.1229],
-                                      [38.7346, 63.9380],
-                                      [659.8110, 446.5352],
-                                      [520.1739, 238.6301],
-                                      [112.8695, 340.1479],
-                                      [710.3906, 715.7178]],
-                             model_path='models/vgg16-397923af.pth',
+                             anchors=[[45, 90], [64, 64], [90, 45],
+                                      [90, 180], [128, 128], [180, 90],
+                                      [180, 360], [256, 256], [360, 180],
+                                      [360, 720], [512, 512], [720, 360]],
+                             backbone=VGG,
                              device=device)
+
+    # faster_rcnn = FasterRCNN(name='FasterRCNN',
+    #                          anchors=[[38.7346, 63.9380],
+    #                                   [64.1715, 175.1229],
+    #                                   [112.8695, 340.1479],
+    #                                   [123.4950, 100.2833],
+    #                                   [212.2724, 189.5562],
+    #                                   [215.3095, 351.9713],
+    #                                   [232.9199, 590.1595],
+    #                                   [365.2326, 410.2795],
+    #                                   [435.3557, 659.2862],
+    #                                   [520.1739, 238.6301],
+    #                                   [659.8110, 446.5352],
+    #                                   [710.3906, 715.7178]],
+    #                          backbone=VGG,
+    #                          device=device)
     # faster_rcnn = FasterRCNN(anchors=[[233.1948, 570.4430],
     #                                   [103.9305, 419.0243],
     #                                   [402.4835, 463.7479],
@@ -59,34 +65,37 @@ def main():
     #                          device=device)
     faster_rcnn.to(device)
 
-    train_data = PascalDatasetImage(root_dir='../data/VOC2012/',
-                                    classes='../data/VOC2012/voc.names',
+    train_data = PascalDatasetImage(root_dir='../../../Data/VOCdevkit/VOC2012/',
+                                    classes='../../../Data/VOCdevkit/voc.names',
                                     dataset='train',
                                     skip_truncated=False,
                                     skip_difficult=False,
-                                    image_size=(800, 800),
+                                    mu=[0.458, 0.438, 0.405],
+                                    sigma=[0.247, 0.242, 0.248],
                                     do_transforms=True,
                                     )
 
-    val_data = PascalDatasetImage(root_dir='../data/VOC2012/',
-                                  classes='../data/VOC2012/voc.names',
+    val_data = PascalDatasetImage(root_dir='../../../Data/VOCdevkit/VOC2012/',
+                                  classes='../../../Data/VOCdevkit/voc.names',
                                   dataset='val',
                                   skip_truncated=False,
                                   skip_difficult=True,
-                                  image_size=(800, 800),
+                                  mu=[0.458, 0.438, 0.405],
+                                  sigma=[0.247, 0.242, 0.248],
                                   do_transforms=False,
                                   )
 
-    test_data = PascalDatasetImage(root_dir='../data/VOC2007/',
-                                   classes='../data/VOC2012/voc.names',
+    test_data = PascalDatasetImage(root_dir='../../../Data/VOCdevkit/VOC2007/',
+                                   classes='../../../Data/VOCdevkit/voc.names',
                                    dataset='test',
                                    skip_truncated=False,
                                    skip_difficult=False,
-                                   image_size=(800, 800),
+                                   mu=[0.458, 0.438, 0.405],
+                                   sigma=[0.247, 0.242, 0.248],
                                    do_transforms=False
                                    )
 
-    faster_rcnn = pickle.load(open('FasterRCNN6.pkl', 'rb'))
+    # faster_rcnn = pickle.load(open('models/FasterRCNNbest.pkl', 'rb'))
 
     if train:
         torch.random.manual_seed(12345)
@@ -114,7 +123,6 @@ def main():
                                        val_data=None,
                                        optimizer=optimizer,
                                        scheduler=scheduler,
-                                       image_batch_size=1,
                                        roi_batch_size=128,
                                        epochs=2,
                                        shuffle=True,
@@ -142,11 +150,10 @@ def main():
         np.random.seed(12345)
 
         faster_rcnn.predict(dataset=test_data,
-                            batch_size=1,
-                            confidence_threshold=0.4,
+                            confidence_threshold=0.1,
                             overlap_threshold=.45,
                             show=True,
-                            export=False
+                            export=True
                             )
 
 
