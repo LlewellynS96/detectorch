@@ -1,4 +1,5 @@
 import os
+import random
 import cv2
 import numpy as np
 import xml.etree.ElementTree as Et
@@ -7,6 +8,7 @@ import csv
 
 
 NUM_WORKERS = 0
+
 VGG_MEAN = [0.458, 0.438, 0.405]
 VGG_STD = [0.247, 0.242, 0.248]
 
@@ -250,27 +252,21 @@ def access_dict_list(dictionary, index):
         return None
 
 
-def random_choice(x, size, replace=False):
-    """
-    Randomly sample from a Tensor. This is similar
-    to numpy.choice.
-    Parameters
-    ----------
-    x : Tensor
-        The Tensor to be sampled from.
-    size : int
-        The number of samples to return.
-    replace : bool
+def sample_ids(n, pos_ids, neg_ids, pos_ratio):
+    num_neg = len(neg_ids)
+    num_pos = len(pos_ids)
+    n_p = int(n * pos_ratio)
+    ids = torch.zeros(n, dtype=torch.long)
+    if num_pos < n_p:
+        n_p = num_pos
+    ids[:n_p] = pos_ids[torch.randperm(num_pos)[:n_p]].squeeze()
+    n_n = n - n_p
+    if num_neg < n_n:
+        ids[-n_n:] = neg_ids[torch.randint(num_neg, (n_n,))].squeeze()
+    else:
+        ids[-n_n:] = neg_ids[torch.randperm(num_neg)[:n_n]].squeeze()
 
-    Returns
-    -------
-    Tensor
-        A Tensor containing :math:`size` random samples from the original Tensor.
-
-    """
-    idx = torch.multinomial(torch.ones(x.numel()), size, replacement=replace)
-
-    return x[idx].squeeze()
+    return ids, n_p, n_n
 
 
 def xyxy2xywh(xyxy):
@@ -509,3 +505,9 @@ class nullcontext:
 
     def __exit__(self, *args):
         pass
+
+
+def set_random_seed(x):
+    np.random.seed(x)
+    torch.random.manual_seed(x)
+    random.seed(x)

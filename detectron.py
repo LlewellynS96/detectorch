@@ -10,7 +10,7 @@ import numpy as np
 from torchvision import models, ops
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from utils import jaccard, random_choice, parameterize_bboxes, deparameterize_bboxes, access_dict_list, export_prediction
+from utils import jaccard, sample_ids, parameterize_bboxes, deparameterize_bboxes, access_dict_list, export_prediction
 from utils import to_numpy_image, add_bbox_to_image, nullcontext
 from utils import NUM_WORKERS
 from layers import FocalLoss
@@ -20,7 +20,7 @@ NETWORK_STRIDE = 16
 RPN_HI_THRESHOLD = 0.7
 RPN_LO_THRESHOLD = 0.3
 FRCN_HI_THRESHOLD = 0.5
-FRCN_LO_LO_THRESHOLD = 0.1
+FRCN_LO_LO_THRESHOLD = 0.01
 FRCN_LO_HI_THRESHOLD = 0.5
 RPN_POS_RATIO = 0.5
 FRCN_POS_RATIO = 0.25
@@ -159,26 +159,26 @@ class FastRCNN(nn.Module):
                             rois = rpn.post_process(cls, reg, grid_size, MAX_TRAIN_RPN_ROIS, True)[1][0]
                         ious = jaccard(rois, bboxes)
                         max_iou, argmax_iou = torch.max(ious, dim=1)
-                        positive_mask = max_iou > FRCN_HI_THRESHOLD
+                        pos_mask = max_iou > FRCN_HI_THRESHOLD
                         abs_max_iou = torch.argmax(ious, dim=0)
-                        positive_mask[abs_max_iou] = 1  # Added ROI with maximum IoU to positive samples.
-                        positive_mask = torch.nonzero(positive_mask)
-                        negative_mask = torch.nonzero((FRCN_LO_LO_THRESHOLD < max_iou) *
+                        pos_mask[abs_max_iou] = 1  # Added ROI with maximum IoU to pos samples.
+                        pos_mask = torch.nonzero(pos_mask)
+                        neg_mask = torch.nonzero((FRCN_LO_LO_THRESHOLD < max_iou) *
                                                       (max_iou < FRCN_LO_HI_THRESHOLD))
-                        if negative_mask.numel() > 0:
-                            samples = random_choice(negative_mask, roi_batch_size, replace=True)
+                        if neg_mask.numel() > 0:
+                            samples = random_choice(neg_mask, roi_batch_size, replace=True)
                         else:
-                            negative_mask = torch.nonzero(max_iou < FRCN_LO_HI_THRESHOLD)
-                            if negative_mask.numel() > 0:
-                                samples = random_choice(negative_mask, roi_batch_size, replace=True)
+                            neg_mask = torch.nonzero(max_iou < FRCN_LO_HI_THRESHOLD)
+                            if neg_mask.numel() > 0:
+                                samples = random_choice(neg_mask, roi_batch_size, replace=True)
                             else:
-                                negative_mask = torch.nonzero(max_iou < FRCN_HI_THRESHOLD)
-                                samples = random_choice(negative_mask, roi_batch_size, replace=True)
+                                neg_mask = torch.nonzero(max_iou < FRCN_HI_THRESHOLD)
+                                samples = random_choice(neg_mask, roi_batch_size, replace=True)
                         frcn_pos_numel = int(roi_batch_size * FRCN_POS_RATIO)
-                        if positive_mask.numel() < frcn_pos_numel:
-                            frcn_pos_numel = positive_mask.numel()
+                        if pos_mask.numel() < frcn_pos_numel:
+                            frcn_pos_numel = pos_mask.numel()
                         if frcn_pos_numel > 0:
-                            samples[:frcn_pos_numel] = random_choice(positive_mask, frcn_pos_numel)
+                            samples[:frcn_pos_numel] = random_choice(pos_mask, frcn_pos_numel)
                         target_rois[i] = rois[samples]
                         target_classes[i][:frcn_pos_numel] = image_classes[argmax_iou[samples[:frcn_pos_numel]]]
                         target_classes[i][frcn_pos_numel:, 0] = 1.
@@ -208,7 +208,7 @@ class FastRCNN(nn.Module):
 
         return train_loss, val_loss
 
-    def loss(self, cls, reg, target_cls, target_reg, focal=False):
+    def loss(self, reg, cls, target_reg, target_cls, stats, focal=False):
 
         loss = dict()
         lambd = 1. / cls.shape[0] / cls.shape[1]
@@ -225,7 +225,7 @@ class FastRCNN(nn.Module):
         arange = torch.arange(len(obj_mask))
         obj_mask = tuple(obj_mask.t())
         if len(obj_mask) > 0:
-            cls = torch.argmax(target_cls, dim=-1) - 1.
+            cls = torch.argmax(target_cls, dim=-1) - 1
             loss['reg'] = 4. * lambd * nn.SmoothL1Loss(reduction='sum')(reg[obj_mask][arange, cls[obj_mask]],
                                                                         target_reg[obj_mask])
         else:
@@ -290,26 +290,26 @@ class FastRCNN(nn.Module):
                             rois = rpn.post_process(cls, reg, grid_size, MAX_TRAIN_RPN_ROIS, True)[1][0]
                         ious = jaccard(rois, image_bboxes)
                         max_iou, argmax_iou = torch.max(ious, dim=1)
-                        positive_mask = max_iou > FRCN_HI_THRESHOLD
+                        pos_mask = max_iou > FRCN_HI_THRESHOLD
                         abs_max_iou = torch.argmax(ious, dim=0)
-                        positive_mask[abs_max_iou] = 1  # Added ROI with maximum IoU to positive samples.
-                        positive_mask = torch.nonzero(positive_mask)
-                        negative_mask = torch.nonzero((FRCN_LO_LO_THRESHOLD < max_iou) *
+                        pos_mask[abs_max_iou] = 1  # Added ROI with maximum IoU to pos samples.
+                        pos_mask = torch.nonzero(pos_mask)
+                        neg_mask = torch.nonzero((FRCN_LO_LO_THRESHOLD < max_iou) *
                                                       (max_iou < FRCN_LO_HI_THRESHOLD))
-                        if negative_mask.numel() > 0:
-                            samples = random_choice(negative_mask, roi_batch_size, replace=True)
+                        if neg_mask.numel() > 0:
+                            samples = random_choice(neg_mask, roi_batch_size, replace=True)
                         else:
-                            negative_mask = torch.nonzero(max_iou < FRCN_LO_HI_THRESHOLD)
-                            if negative_mask.numel() > 0:
-                                samples = random_choice(negative_mask, roi_batch_size, replace=True)
+                            neg_mask = torch.nonzero(max_iou < FRCN_LO_HI_THRESHOLD)
+                            if neg_mask.numel() > 0:
+                                samples = random_choice(neg_mask, roi_batch_size, replace=True)
                             else:
-                                negative_mask = torch.nonzero(max_iou < FRCN_HI_THRESHOLD)
-                                samples = random_choice(negative_mask, roi_batch_size, replace=True)
+                                neg_mask = torch.nonzero(max_iou < FRCN_HI_THRESHOLD)
+                                samples = random_choice(neg_mask, roi_batch_size, replace=True)
                         frcn_pos_numel = int(roi_batch_size * FRCN_POS_RATIO)
-                        if positive_mask.numel() < frcn_pos_numel:
-                            frcn_pos_numel = positive_mask.numel()
+                        if pos_mask.numel() < frcn_pos_numel:
+                            frcn_pos_numel = pos_mask.numel()
                         if frcn_pos_numel > 0:
-                            samples[:frcn_pos_numel] = random_choice(positive_mask, frcn_pos_numel)
+                            samples[:frcn_pos_numel] = random_choice(pos_mask, frcn_pos_numel)
                         target_rois[j] = rois[samples]
                         target_classes[j][:frcn_pos_numel] = image_classes[argmax_iou[samples[:frcn_pos_numel]]]
                         target_classes[j][frcn_pos_numel:, 0] = 1.
@@ -413,9 +413,14 @@ class RPN(nn.Module):
         self.cls = nn.Conv2d(in_channels=self.num_features,
                              out_channels=2 * self.num_anchors,
                              kernel_size=1)
+        self.cls.weight.data.normal_(0., 0.01)
+        self.cls.bias.data.fill_(0)
+
         self.reg = nn.Conv2d(in_channels=self.num_features,
                              out_channels=4 * self.num_anchors,
                              kernel_size=1)
+        self.reg.weight.data.normal_(0., 0.01)
+        self.reg.bias.data.fill_(0)
 
         self.to(device)
 
@@ -541,16 +546,16 @@ class RPN(nn.Module):
                         anchors = anchors[valid]
                         ious = jaccard(anchors, target_bboxes)
                         max_iou, argmax_iou = torch.max(ious, dim=1)
-                        positive_mask = max_iou > RPN_HI_THRESHOLD
+                        pos_mask = max_iou > RPN_HI_THRESHOLD
                         abs_max_iou = torch.argmax(ious, dim=0)
-                        positive_mask[abs_max_iou] = 1
-                        positive_mask = torch.nonzero(positive_mask)
-                        negative_mask = torch.nonzero(max_iou < RPN_LO_THRESHOLD)
-                        target_anchors = random_choice(negative_mask, batch_size)
+                        pos_mask[abs_max_iou] = 1
+                        pos_mask = torch.nonzero(pos_mask)
+                        neg_mask = torch.nonzero(max_iou < RPN_LO_THRESHOLD)
+                        target_anchors = random_choice(neg_mask, batch_size)
                         rpn_pos_numel = int(batch_size * RPN_POS_RATIO)
-                        if positive_mask.numel() < rpn_pos_numel:
-                            rpn_pos_numel = positive_mask.numel()
-                        target_anchors[:rpn_pos_numel] = random_choice(positive_mask, rpn_pos_numel)
+                        if pos_mask.numel() < rpn_pos_numel:
+                            rpn_pos_numel = pos_mask.numel()
+                        target_anchors[:rpn_pos_numel] = random_choice(pos_mask, rpn_pos_numel)
                         target_cls = torch.zeros(batch_size, 2, device=self.device)
                         target_cls[:rpn_pos_numel, 0] = 1
                         target_cls[rpn_pos_numel:, 1] = 1
@@ -582,20 +587,20 @@ class RPN(nn.Module):
         return train_loss, val_loss
 
     @staticmethod
-    def loss(reg, cls, target_reg, target_cls, focal=False):
+    def loss(reg, cls, target_reg, target_cls, stats, focal=False):
 
         loss = dict()
-        lambd = 5.
         target_cls = torch.argmax(target_cls, dim=-1)
 
         if focal:
-            loss['cls'] = FocalLoss(reduction='mean')(cls, target_cls)
+            loss['cls'] = FocalLoss(reduction='sum')(cls, target_cls)
         else:
-            loss['cls'] = nn.CrossEntropyLoss(reduction='mean')(cls, target_cls)
+            loss['cls'] = nn.CrossEntropyLoss(reduction='sum')(cls, target_cls)
+        loss['cls'] /= cls.shape[0]
 
-        obj_mask = torch.nonzero(target_cls == 0).squeeze()
-        loss['reg'] = lambd * nn.SmoothL1Loss(reduction='mean')(reg[obj_mask],
-                                                                target_reg[obj_mask])
+        loss['reg'] = nn.SmoothL1Loss(reduction='sum')(reg,
+                                                       target_reg)
+        loss['reg'] /= cls.shape[0]
 
         loss['total'] = loss['cls'] + loss['reg']
         return loss
@@ -650,16 +655,16 @@ class RPN(nn.Module):
                     reg = deparameterize_bboxes(reg, anchors)
                     ious = jaccard(anchors, target_bboxes)
                     max_iou, argmax_iou = torch.max(ious, dim=1)
-                    positive_mask = max_iou > RPN_HI_THRESHOLD
+                    pos_mask = max_iou > RPN_HI_THRESHOLD
                     abs_max_iou = torch.argmax(ious, dim=0)
-                    positive_mask[abs_max_iou] = 1
-                    positive_mask = torch.nonzero(positive_mask)
-                    negative_mask = torch.nonzero(max_iou < RPN_LO_THRESHOLD)
-                    target_anchors = random_choice(negative_mask, batch_size)
+                    pos_mask[abs_max_iou] = 1
+                    pos_mask = torch.nonzero(pos_mask)
+                    neg_mask = torch.nonzero(max_iou < RPN_LO_THRESHOLD)
+                    target_anchors = random_choice(neg_mask, batch_size)
                     rpn_pos_numel = int(batch_size * RPN_POS_RATIO)
-                    if positive_mask.numel() < rpn_pos_numel:
-                        rpn_pos_numel = positive_mask.numel()
-                    target_anchors[:rpn_pos_numel] = random_choice(positive_mask, rpn_pos_numel)
+                    if pos_mask.numel() < rpn_pos_numel:
+                        rpn_pos_numel = pos_mask.numel()
+                    target_anchors[:rpn_pos_numel] = random_choice(pos_mask, rpn_pos_numel)
                     target_cls = torch.zeros(batch_size, 2, device=self.device)
                     target_cls[:rpn_pos_numel, 0] = 1
                     target_cls[rpn_pos_numel:, 1] = 1
@@ -695,6 +700,9 @@ class FasterRCNN(nn.Module):
 
         self.name = name
         self.num_classes = num_classes
+
+        self.iteration = 0
+
         self.device = device
 
     def forward(self, x):
@@ -917,12 +925,11 @@ class FasterRCNN(nn.Module):
             return train_loss, val_loss
 
     def joint_training(self, train_data, optimizer, scheduler=None, image_batch_size=2,
-                       roi_batch_size=32, epochs=1, val_data=None, shuffle=True, checkpoint_frequency=100):
+                       rpn_batch_size=256, frcn_batch_size=64, epochs=1, val_data=None, shuffle=True, checkpoint_frequency=100):
 
         self.train()
 
         train_dataloader = DataLoader(dataset=train_data,
-                                      batch_size=image_batch_size,
                                       shuffle=shuffle,
                                       num_workers=NUM_WORKERS)
 
@@ -930,99 +937,90 @@ class FasterRCNN(nn.Module):
         val_loss = []
 
         for epoch in range(1, epochs + 1):
+            stats = {'avg_obj_iou': [], 'avg_class': [], 'avg_pobj': [], 'avg_pnoobj': []}
             rpn_loss = []
             frcn_loss = []
             with tqdm(total=len(train_dataloader),
                       desc='Epoch: [{}/{}]'.format(epoch, epochs),
                       leave=True,
                       unit='batches') as inner:
-                for images, images_info, images_transforms in train_dataloader:
+                for images, images_info, (images_bboxes, images_classes) in train_dataloader:
                     images = images.to(self.device)
-                    image_batch_size = len(images)
-                    frcn_target_rois = [torch.zeros(roi_batch_size, 4, device=self.device)] * image_batch_size
-                    frcn_target_classes = torch.zeros(image_batch_size, roi_batch_size, self.num_classes + 1,
-                                                      device=self.device)
-                    target_bboxes = torch.zeros(image_batch_size, roi_batch_size, 4, device=self.device)
-                    optimizer.zero_grad()
-                    features = self.fast_rcnn.features(images)
-                    for i in range(image_batch_size):
-                        image_info_copy = access_dict_list(images_info, i)
-                        image_transforms_copy = access_dict_list(images_transforms, i)
-                        image_bboxes, image_classes = train_data.get_gt_bboxes(image_info_copy, image_transforms_copy)
-                        image_bboxes = image_bboxes.to(self.device)
-                        image_classes = image_classes.to(self.device)
-                        if image_bboxes.numel() > 0:
-                            cls, reg = self.rpn(features[i][None])
-                            cls_copy = cls.clone()
-                            reg_copy = reg.clone()
-                            grid_size = torch.tensor(features.shape[-2:], device=self.device)
-                            anchors = self.rpn.construct_anchors(grid_size)
-                            valid = self.rpn.validate_anchors(anchors)  # This has the effect of scrambling anchors
-                            cls = cls[0][valid]
-                            reg = reg[0][valid]
-                            anchors = anchors[valid]
-                            ious = jaccard(anchors, image_bboxes)
-                            max_iou, argmax_iou = torch.max(ious, dim=1)
-                            positive_mask = max_iou > RPN_HI_THRESHOLD
-                            abs_max_iou = torch.argmax(ious, dim=0)
-                            positive_mask[abs_max_iou] = 1
-                            positive_mask = torch.nonzero(positive_mask)
-                            negative_mask = torch.nonzero(max_iou < RPN_LO_THRESHOLD)
-                            target_anchors = random_choice(negative_mask, roi_batch_size)
-                            rpn_pos_numel = int(roi_batch_size * RPN_POS_RATIO)
-                            if positive_mask.numel() < rpn_pos_numel:
-                                rpn_pos_numel = positive_mask.numel()
-                            target_anchors[:rpn_pos_numel] = random_choice(positive_mask, rpn_pos_numel)
-                            target_cls = torch.zeros(roi_batch_size, 2, device=self.device)
-                            target_cls[:rpn_pos_numel, 0] = 1
-                            target_cls[rpn_pos_numel:, 1] = 1
-                            image_bboxes_copy = image_bboxes[argmax_iou][target_anchors]
-                            target_reg = parameterize_bboxes(image_bboxes_copy, anchors[target_anchors])
-                            cls = cls[target_anchors]
-                            reg = reg[target_anchors]
-                            loss = self.rpn.loss(cls, reg, target_cls, target_reg)
-                            rpn_loss.append(loss['total'].item())
-                            loss['total'].backward(retain_graph=True)
-                            # FRCN
-                            rois = self.rpn.post_process(cls_copy, reg_copy, grid_size, MAX_TRAIN_RPN_ROIS, True)[1][0]
-                            ious = jaccard(rois, image_bboxes)
-                            max_iou, argmax_iou = torch.max(ious, dim=1)
-                            positive_mask = max_iou > FRCN_HI_THRESHOLD
-                            abs_max_iou = torch.argmax(ious, dim=0)
-                            positive_mask[abs_max_iou] = 1  # Added ROI with maximum IoU to positive samples.
-                            positive_mask = torch.nonzero(positive_mask)
-                            negative_mask = torch.nonzero(
-                                (FRCN_LO_LO_THRESHOLD < max_iou) * (max_iou < FRCN_LO_HI_THRESHOLD))
-                            if negative_mask.numel() > 0:
-                                samples = random_choice(negative_mask, roi_batch_size, replace=True)
-                            else:
-                                negative_mask = torch.nonzero(max_iou < FRCN_LO_HI_THRESHOLD)
-                                if negative_mask.numel() > 0:
-                                    samples = random_choice(negative_mask, roi_batch_size, replace=True)
-                                else:
-                                    negative_mask = torch.nonzero(max_iou < FRCN_HI_THRESHOLD)
-                                    samples = random_choice(negative_mask, roi_batch_size, replace=True)
-                            frcn_pos_numel = int(roi_batch_size * FRCN_POS_RATIO)
-                            if positive_mask.numel() < frcn_pos_numel:
-                                frcn_pos_numel = positive_mask.numel()
-                            if frcn_pos_numel > 0:
-                                samples[:frcn_pos_numel] = random_choice(positive_mask, frcn_pos_numel)
-                            frcn_target_rois[i] = rois[samples].detach()
-                            frcn_target_classes[i][:frcn_pos_numel] = image_classes[argmax_iou[samples[:frcn_pos_numel]]]
-                            frcn_target_classes[i][frcn_pos_numel:, 0] = 1.
-                            target_bboxes[i] = parameterize_bboxes(image_bboxes[argmax_iou[samples]], rois[samples])
-                    cls, reg = self.fast_rcnn(features[i, None], frcn_target_rois, extract_features=False)
-                    loss = self.fast_rcnn.loss(cls, reg, frcn_target_classes.detach(), target_bboxes.detach())
+                    images_bboxes = images_bboxes[0].to(self.device)
+                    images_classes = images_classes[0].to(self.device)
+                    if inner.n % image_batch_size == 0:
+                        optimizer.zero_grad()
+                    features = self.fast_rcnn.backbone.features(images)
+                    if images_bboxes.numel() > 0:
+                        reg, cls = self.rpn(features)
+                        cls_og = cls.clone()
+                        reg_og = reg.clone()
+                        grid_size = torch.tensor(features.shape[-2:], device=self.device)
+                        anchors = self.rpn.construct_anchors(grid_size)
+                        valid = self.rpn.validate_anchors(anchors)  # This has the effect of scrambling anchors
+                        cls = cls[0][valid]
+                        reg = reg[0][valid]
+                        anchors = anchors[valid]
+                        ious = jaccard(anchors, images_bboxes)
+                        max_iou, argmax_iou = torch.max(ious, dim=1)
+                        pos_mask = max_iou > RPN_HI_THRESHOLD
+                        abs_max_iou = torch.argmax(ious, dim=0)
+                        pos_mask[abs_max_iou] = True
+                        neg_mask = torch.nonzero((max_iou < RPN_LO_THRESHOLD) * (~pos_mask))
+                        pos_mask = torch.nonzero(pos_mask)
+                        samples, n_p, n_n = sample_ids(rpn_batch_size, pos_mask, neg_mask, RPN_POS_RATIO)
+                        target_cls = torch.zeros(rpn_batch_size, 2, device=self.device)
+                        target_cls[:n_p, 0] = 1.
+                        target_cls[-n_n:, 1] = 1.
+                        images_bboxes_ = images_bboxes[argmax_iou][samples[:n_p]]
+                        target_reg = parameterize_bboxes(images_bboxes_, anchors[samples[:n_p]])
+                        reg = reg[samples[:n_p]]
+                        cls = cls[samples]
+                        loss = self.rpn.loss(reg, cls, target_reg, target_cls, stats)
+                        rpn_loss.append(loss['total'].item())
+                        loss['total'].backward(retain_graph=True)
+                        # FRCN
+                        rois = self.rpn.post_process(reg_og, cls_og, grid_size, MAX_TRAIN_RPN_ROIS, True)[0]
+                        ious = jaccard(rois, images_bboxes)
+                        max_iou, argmax_iou = torch.max(ious, dim=1)
+                        pos_mask = max_iou > FRCN_HI_THRESHOLD
+                        abs_max_iou = torch.argmax(ious, dim=0)
+                        pos_mask[abs_max_iou] = 1  # Added ROI with maximum IoU to pos samples.
+                        pos_mask = torch.nonzero(pos_mask)
+                        neg_mask = torch.nonzero((FRCN_LO_LO_THRESHOLD < max_iou) * (max_iou < FRCN_LO_HI_THRESHOLD))
+                        samples, n_p, n_n = sample_ids(frcn_batch_size, pos_mask, neg_mask, FRCN_POS_RATIO)
+                        frcn_target_rois = rois[samples]
+                        frcn_target_classes = torch.zeros(frcn_batch_size, self.num_classes + 1, device=self.device)
+                        frcn_target_classes[:n_p] = images_classes[argmax_iou[samples[:n_p]]]
+                        frcn_target_classes[-n_n:, 0] = 1.
+                        target_bboxes = parameterize_bboxes(images_bboxes[argmax_iou[samples[:n_p]]],
+                                                            rois[samples[:n_p]])
+                    reg, cls = self.fast_rcnn(features, frcn_target_rois, extract_features=False)
+                    reg = reg[:n_p]
+                    loss = self.fast_rcnn.loss(reg, cls, target_bboxes[None].detach(), frcn_target_classes[None].detach(), stats)
                     frcn_loss.append(loss['total'].item())
                     loss['total'].backward()
-                    # torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=5., norm_type='inf')
-                    optimizer.step()
-                    inner.set_postfix_str(' RPN Training Loss: {:.6f},  FRCN Training Loss: {:.6f}'.format(np.mean(rpn_loss), np.mean(frcn_loss)))
+
+                    weights = np.arange(1, 1 + len(frcn_loss))
+                    disp_str = ' RPN Training Loss: {:.6f}, '.format(np.average(rpn_loss, weights=weights)) + \
+                               ' FRCN Training Loss: {:.6f}, '.format(np.average(frcn_loss, weights=weights)) + \
+                               ' Avg IOU: {:.4f},  '.format(np.average(stats['avg_obj_iou'], weights=weights)) + \
+                               ' Avg P|Obj: {:.4f},  '.format(np.average(stats['avg_pobj'], weights=weights)) + \
+                               ' Avg P|Noobj: {:.4f},  '.format(np.average(stats['avg_pnoobj'], weights=weights)) + \
+                               ' Avg Class: {:.4f}, '.format(np.average(stats['avg_class'], weights=weights)) + \
+                               ' Iteration: {:d}'.format(self.iteration)
+                    inner.set_postfix_str(disp_str)
+                    torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1., norm_type='inf')  # ???
+                    if (inner.n + 1) % image_batch_size == 0:
+                        optimizer.step()
+                        if scheduler is not None:
+                            scheduler.step()
+                            self.iteration += 1
                     inner.update()
-                train_loss.append([np.mean(rpn_loss), np.mean(frcn_loss)])
+                train_loss.append([np.average(rpn_loss, weights=weights), np.average(frcn_loss, weights=weights)])
                 if val_data is not None:
                     val_data.reset_image_size()
-                    val_loss.append(self.calculate_loss(val_data, image_batch_size, roi_batch_size))
+                    val_loss.append(self.calculate_loss(val_data, roi_batch_size))
                     inner.set_postfix_str(' RPN Training Loss: {:.6f},  '
                                           'FRCN Training Loss: {:.6f},  '
                                           'RPN Validation Loss: {:.6f},  '
@@ -1045,122 +1043,121 @@ class FasterRCNN(nn.Module):
 
         return train_loss, val_loss
 
-    def calculate_loss(self, data, image_batch_size=2, roi_batch_size=128, fraction=0.01):
-        """
-        Calculates the loss for a random partition of a given dataset without
-        tracking gradients. Useful for displaying the validation loss during
-        training or the test loss during evaluation.
-        Parameters
-        ----------
-        data : PascalDatasetImage
-            A dataset object which returns images and image info to use for calculating
-            the loss. Only a fraction of the images in the dataset will be tested.
-        image_batch_size : int
-            The number of images to load for each batch and for which the loss should be
-            calculated. This should not influence the value that the function returns,
-            but will affect performance.
-        roi_batch_size : int
-            The number of ROIs per image for which the loss should be calculated. This
-            should not influence the value that the function returns, but will affect
-            performance.
-        fraction : float
-            The fraction of images from data that the loss should be calculated for.
-
-        Returns
-        -------
-        tuple
-            The mean RPN and FRCN loss over the fraction of the images that were sampled from
-            the data.
-        """
-        val_dataloader = DataLoader(dataset=data,
-                                    batch_size=image_batch_size,
-                                    shuffle=True,
-                                    num_workers=NUM_WORKERS)
-        rpn_losses = []
-        frcn_losses = []
-
-        with torch.no_grad():
-            for i, (images, images_info, images_transforms) in enumerate(val_dataloader, 1):
-                images = images.to(self.device)
-                image_batch_size = len(images)
-                frcn_target_rois = [torch.zeros(roi_batch_size, 4, device=self.device)] * image_batch_size
-                frcn_target_classes = torch.zeros(image_batch_size, roi_batch_size, self.num_classes + 1,
-                                                  device=self.device)
-                target_bboxes = torch.zeros(image_batch_size, roi_batch_size, 4, device=self.device)
-                features = self.fast_rcnn.features(images)
-                for i in range(image_batch_size):
-                    image_info_copy = access_dict_list(images_info, i)
-                    image_transforms_copy = access_dict_list(images_transforms, i)
-                    image_bboxes, image_classes = data.get_gt_bboxes(image_info_copy, image_transforms_copy)
-                    image_bboxes = image_bboxes.to(self.device)
-                    image_classes = image_classes.to(self.device)
-                    if image_bboxes.numel() > 0:
-                        cls, reg = self.rpn(features[i][None])
-                        cls_copy = cls.clone()
-                        reg_copy = reg.clone()
-                        grid_size = torch.tensor(features.shape[-2:], device=self.device)
-                        anchors = self.rpn.construct_anchors(grid_size)
-                        valid = self.rpn.validate_anchors(anchors)
-                        cls = cls[0][valid]
-                        reg = reg[0][valid]
-                        anchors = anchors[valid]
-                        reg = deparameterize_bboxes(reg, anchors)
-                        ious = jaccard(anchors, image_bboxes)
-                        max_iou, argmax_iou = torch.max(ious, dim=1)
-                        positive_mask = max_iou > RPN_HI_THRESHOLD
-                        abs_max_iou = torch.argmax(ious, dim=0)
-                        positive_mask[abs_max_iou] = 1
-                        positive_mask = torch.nonzero(positive_mask)
-                        negative_mask = torch.nonzero(max_iou < RPN_LO_THRESHOLD)
-                        target_anchors = random_choice(negative_mask, roi_batch_size)
-                        rpn_pos_numel = int(roi_batch_size * RPN_POS_RATIO)
-                        if positive_mask.numel() < rpn_pos_numel:
-                            rpn_pos_numel = positive_mask.numel()
-                        target_anchors[:rpn_pos_numel] = random_choice(positive_mask, rpn_pos_numel)
-                        target_cls = torch.zeros(roi_batch_size, 2, device=self.device)
-                        target_cls[:rpn_pos_numel, 0] = 1
-                        target_cls[rpn_pos_numel:, 1] = 1
-                        image_bboxes_copy = image_bboxes[argmax_iou][target_anchors]
-                        target_reg = parameterize_bboxes(image_bboxes_copy, anchors[target_anchors])
-                        cls = cls[target_anchors]
-                        reg = parameterize_bboxes(reg[target_anchors], anchors[target_anchors])
-                        loss = self.rpn.loss(cls, reg, target_cls, target_reg)
-                        rpn_losses.append(loss['total'].item())
-                        # FRCN
-                        rois = self.rpn.post_process(cls_copy, reg_copy, grid_size, MAX_TRAIN_RPN_ROIS, True)[1][0]
-                        ious = jaccard(rois, image_bboxes)
-                        max_iou, argmax_iou = torch.max(ious, dim=1)
-                        positive_mask = max_iou > FRCN_HI_THRESHOLD
-                        abs_max_iou = torch.argmax(ious, dim=0)
-                        positive_mask[abs_max_iou] = 1  # Added ROI with maximum IoU to positive samples.
-                        positive_mask = torch.nonzero(positive_mask)
-                        negative_mask = torch.nonzero(
-                            (FRCN_LO_LO_THRESHOLD < max_iou) * (max_iou < FRCN_LO_HI_THRESHOLD))
-                        if negative_mask.numel() > 0:
-                            samples = random_choice(negative_mask, roi_batch_size, replace=True)
-                        else:
-                            negative_mask = torch.nonzero(max_iou < FRCN_LO_HI_THRESHOLD)
-                            if negative_mask.numel() > 0:
-                                samples = random_choice(negative_mask, roi_batch_size, replace=True)
-                            else:
-                                negative_mask = torch.nonzero(max_iou < FRCN_HI_THRESHOLD)
-                                samples = random_choice(negative_mask, roi_batch_size, replace=True)
-                        frcn_pos_numel = int(roi_batch_size * FRCN_POS_RATIO)
-                        if positive_mask.numel() < frcn_pos_numel:
-                            frcn_pos_numel = positive_mask.numel()
-                        if frcn_pos_numel > 0:
-                            samples[:frcn_pos_numel] = random_choice(positive_mask, frcn_pos_numel)
-                        frcn_target_rois[i] = rois[samples].detach()
-                        frcn_target_classes[i][:frcn_pos_numel] = image_classes[argmax_iou[samples[:frcn_pos_numel]]]
-                        frcn_target_classes[i][frcn_pos_numel:, 0] = 1.
-                        target_bboxes[i] = parameterize_bboxes(image_bboxes[argmax_iou[samples]], rois[samples])
-                cls, reg = self.fast_rcnn(images, frcn_target_rois)
-                loss = self.fast_rcnn.loss(cls, reg, frcn_target_classes.detach(), target_bboxes.detach())
-                frcn_losses.append(loss['total'].item())
-                if i > len(val_dataloader) * fraction:
-                    break
-
-        return np.mean(rpn_losses), np.mean(frcn_losses)
+    # def calculate_loss(self, data, roi_batch_size=128, fraction=0.01):
+    #     """
+    #     Calculates the loss for a random partition of a given dataset without
+    #     tracking gradients. Useful for displaying the validation loss during
+    #     training or the test loss during evaluation.
+    #     Parameters
+    #     ----------
+    #     data : PascalDatasetImage
+    #         A dataset object which returns images and image info to use for calculating
+    #         the loss. Only a fraction of the images in the dataset will be tested.
+    #     image_batch_size : int
+    #         The number of images to load for each batch and for which the loss should be
+    #         calculated. This should not influence the value that the function returns,
+    #         but will affect performance.
+    #     roi_batch_size : int
+    #         The number of ROIs per image for which the loss should be calculated. This
+    #         should not influence the value that the function returns, but will affect
+    #         performance.
+    #     fraction : float
+    #         The fraction of images from data that the loss should be calculated for.
+    #
+    #     Returns
+    #     -------
+    #     tuple
+    #         The mean RPN and FRCN loss over the fraction of the images that were sampled from
+    #         the data.
+    #     """
+    #     val_dataloader = DataLoader(dataset=data,
+    #                                 shuffle=True,
+    #                                 num_workers=NUM_WORKERS)
+    #     rpn_losses = []
+    #     frcn_losses = []
+    #
+    #     with torch.no_grad():
+    #         for i, (images, images_info, images_transforms) in enumerate(val_dataloader, 1):
+    #             images = images.to(self.device)
+    #             image_batch_size = len(images)
+    #             frcn_target_rois = [torch.zeros(roi_batch_size, 4, device=self.device)] * image_batch_size
+    #             frcn_target_classes = torch.zeros(image_batch_size, roi_batch_size, self.num_classes + 1,
+    #                                               device=self.device)
+    #             target_bboxes = torch.zeros(image_batch_size, roi_batch_size, 4, device=self.device)
+    #             features = self.fast_rcnn.features(images)
+    #             for i in range(image_batch_size):
+    #                 image_info_copy = access_dict_list(images_info, i)
+    #                 image_transforms_copy = access_dict_list(images_transforms, i)
+    #                 image_bboxes, image_classes = data.get_gt_bboxes(image_info_copy, image_transforms_copy)
+    #                 image_bboxes = image_bboxes.to(self.device)
+    #                 image_classes = image_classes.to(self.device)
+    #                 if image_bboxes.numel() > 0:
+    #                     cls, reg = self.rpn(features[i][None])
+    #                     cls_copy = cls.clone()
+    #                     reg_copy = reg.clone()
+    #                     grid_size = torch.tensor(features.shape[-2:], device=self.device)
+    #                     anchors = self.rpn.construct_anchors(grid_size)
+    #                     valid = self.rpn.validate_anchors(anchors)
+    #                     cls = cls[0][valid]
+    #                     reg = reg[0][valid]
+    #                     anchors = anchors[valid]
+    #                     reg = deparameterize_bboxes(reg, anchors)
+    #                     ious = jaccard(anchors, image_bboxes)
+    #                     max_iou, argmax_iou = torch.max(ious, dim=1)
+    #                     pos_mask = max_iou > RPN_HI_THRESHOLD
+    #                     abs_max_iou = torch.argmax(ious, dim=0)
+    #                     pos_mask[abs_max_iou] = 1
+    #                     pos_mask = torch.nonzero(pos_mask)
+    #                     neg_mask = torch.nonzero(max_iou < RPN_LO_THRESHOLD)
+    #                     target_anchors = random_choice(neg_mask, roi_batch_size)
+    #                     rpn_pos_numel = int(roi_batch_size * RPN_POS_RATIO)
+    #                     if pos_mask.numel() < rpn_pos_numel:
+    #                         rpn_pos_numel = pos_mask.numel()
+    #                     target_anchors[:rpn_pos_numel] = random_choice(pos_mask, rpn_pos_numel)
+    #                     target_cls = torch.zeros(roi_batch_size, 2, device=self.device)
+    #                     target_cls[:rpn_pos_numel, 0] = 1
+    #                     target_cls[rpn_pos_numel:, 1] = 1
+    #                     image_bboxes_copy = image_bboxes[argmax_iou][target_anchors]
+    #                     target_reg = parameterize_bboxes(image_bboxes_copy, anchors[target_anchors])
+    #                     cls = cls[target_anchors]
+    #                     reg = parameterize_bboxes(reg[target_anchors], anchors[target_anchors])
+    #                     loss = self.rpn.loss(cls, reg, target_cls, target_reg)
+    #                     rpn_losses.append(loss['total'].item())
+    #                     # FRCN
+    #                     rois = self.rpn.post_process(cls_copy, reg_copy, grid_size, MAX_TRAIN_RPN_ROIS, True)[1][0]
+    #                     ious = jaccard(rois, image_bboxes)
+    #                     max_iou, argmax_iou = torch.max(ious, dim=1)
+    #                     pos_mask = max_iou > FRCN_HI_THRESHOLD
+    #                     abs_max_iou = torch.argmax(ious, dim=0)
+    #                     pos_mask[abs_max_iou] = 1  # Added ROI with maximum IoU to pos samples.
+    #                     pos_mask = torch.nonzero(pos_mask)
+    #                     neg_mask = torch.nonzero(
+    #                         (FRCN_LO_LO_THRESHOLD < max_iou) * (max_iou < FRCN_LO_HI_THRESHOLD))
+    #                     if neg_mask.numel() > 0:
+    #                         samples = random_choice(neg_mask, roi_batch_size, replace=True)
+    #                     else:
+    #                         neg_mask = torch.nonzero(max_iou < FRCN_LO_HI_THRESHOLD)
+    #                         if neg_mask.numel() > 0:
+    #                             samples = random_choice(neg_mask, roi_batch_size, replace=True)
+    #                         else:
+    #                             neg_mask = torch.nonzero(max_iou < FRCN_HI_THRESHOLD)
+    #                             samples = random_choice(neg_mask, roi_batch_size, replace=True)
+    #                     frcn_pos_numel = int(roi_batch_size * FRCN_POS_RATIO)
+    #                     if pos_mask.numel() < frcn_pos_numel:
+    #                         frcn_pos_numel = pos_mask.numel()
+    #                     if frcn_pos_numel > 0:
+    #                         samples[:frcn_pos_numel] = random_choice(pos_mask, frcn_pos_numel)
+    #                     frcn_target_rois[i] = rois[samples].detach()
+    #                     frcn_target_classes[i][:frcn_pos_numel] = image_classes[argmax_iou[samples[:frcn_pos_numel]]]
+    #                     frcn_target_classes[i][frcn_pos_numel:, 0] = 1.
+    #                     target_bboxes[i] = parameterize_bboxes(image_bboxes[argmax_iou[samples]], rois[samples])
+    #             cls, reg = self.fast_rcnn(images, frcn_target_rois)
+    #             loss = self.fast_rcnn.loss(cls, reg, frcn_target_classes.detach(), target_bboxes.detach())
+    #             frcn_losses.append(loss['total'].item())
+    #             if i > len(val_dataloader) * fraction:
+    #                 break
+    #
+    #     return np.mean(rpn_losses), np.mean(frcn_losses)
 
     def save_model(self, name):
         """

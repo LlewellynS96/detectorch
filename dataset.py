@@ -1,11 +1,14 @@
 import os
+import random
 import torch
 import numpy as np
 from torch.utils.data import Dataset
 import torchvision.transforms
-from utils import VGG_MEAN, VGG_STD, SS_MEAN, SS_STD
+from utils import VGG_MEAN, VGG_STD, SS_MEAN, SS_STD, to_numpy_image, add_bbox_to_image
 from utils import read_classes, get_pascal_annotations, get_ss_annotations
 from PIL import Image, ImageFilter
+
+SMALL_THRESHOLD = 0.005
 
 
 class PascalDatasetImage(Dataset):
@@ -77,6 +80,7 @@ class PascalDatasetImage(Dataset):
 
         self.images = list(set(self.images))  # Remove duplicates.
         self.images.sort()
+        # random.shuffle(self.images)
 
     def __getitem__(self, index):
         """
@@ -113,7 +117,7 @@ class PascalDatasetImage(Dataset):
             oversize = 0.2
             image_resize = np.array([image_info['width'], image_info['height']] * np.array((1. + oversize)),
                                     dtype=np.int)
-            crop_offset = np.random.random(size=2) * oversize * [image_info['width'], image_info['height']]
+            crop_offset = np.random.random(size=1) * oversize * [image_info['width'], image_info['height']]
             crop_offset = crop_offset.astype(dtype=np.int)
             image = image.resize(image_resize)
             if random_flip >= 0.5:
@@ -130,29 +134,30 @@ class PascalDatasetImage(Dataset):
         image = torchvision.transforms.Normalize(mean=self.mu, std=self.sigma)(image)
 
         if self.return_targets:
-            annotations = get_pascal_annotations(self.annotations_dir, image_info['id'])
+            annotations = get_pascal_annotations(self.annotations_dir[dataset], image_info['id'])
             bboxes = []
             classes = []
             # For each object in image.
             for annotation in annotations:
-                name, xmin, ymin, xmax, ymax, _, _ = annotation
-                if (self.skip_truncated and annotation[5]) or (self.skip_difficult and annotation[6]):
+                name, xmin, ymin, xmax, ymax, truncated, difficult = annotation
+                if (self.skip_truncated and truncated) or (self.skip_difficult and difficult):
                     continue
                 if name not in self.classes:
                     continue
-                xmin = (xmin * image_resize[0] - crop_offset[0]) / image_info['w']
-                xmax = (xmax * image_resize[0] - crop_offset[0]) / image_info['w']
-                ymin = (ymin * image_resize[1] - crop_offset[1]) / image_info['h']
-                ymax = (ymax * image_resize[1] - crop_offset[1]) / image_info['h']
-                if random_flip >= 0.5:
-                    tmp = xmin
-                    xmin = 1. - xmax
-                    xmax = 1. - tmp
+                if self.do_transforms:
+                    if random_flip >= 0.5:
+                        tmp = xmin
+                        xmin = 1. - xmax
+                        xmax = 1. - tmp
+                    xmin = (xmin * image_resize[0] - crop_offset[0]) / image_info['width']
+                    xmax = (xmax * image_resize[0] - crop_offset[0]) / image_info['width']
+                    ymin = (ymin * image_resize[1] - crop_offset[1]) / image_info['height']
+                    ymax = (ymax * image_resize[1] - crop_offset[1]) / image_info['height']
                 xmin = np.clip(xmin, a_min=0, a_max=1)
                 xmax = np.clip(xmax, a_min=0, a_max=1)
                 ymin = np.clip(ymin, a_min=0, a_max=1)
                 ymax = np.clip(ymax, a_min=0, a_max=1)
-                if (xmax - xmin) > 0 and (ymax - ymin) > 0:
+                if (xmax - xmin) > SMALL_THRESHOLD and (ymax - ymin) > SMALL_THRESHOLD:
                     bboxes.append([xmin, ymin, xmax, ymax])
                     classes.append(self.encode_categorical(name))
 
