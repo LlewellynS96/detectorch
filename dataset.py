@@ -8,7 +8,7 @@ from utils import VGG_MEAN, VGG_STD, SS_MEAN, SS_STD, to_numpy_image, add_bbox_t
 from utils import read_classes, get_pascal_annotations, get_ss_annotations
 from PIL import Image, ImageFilter
 
-SMALL_THRESHOLD = 0.005
+SMALL_THRESHOLD = 0.01
 
 
 class PascalDatasetImage(Dataset):

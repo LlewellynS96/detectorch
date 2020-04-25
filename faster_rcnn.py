@@ -6,7 +6,7 @@ import matplotlib.pyplot as plt
 from detectron import FastRCNN, FasterRCNN, RPN, VGGBackbone
 from dataset import PascalDatasetImage
 from torchvision import models
-from utils import to_numpy_image, add_bbox_to_image, access_dict_list, jaccard, set_random_seed
+from utils import step_decay_scheduler, to_numpy_image, add_bbox_to_image, access_dict_list, jaccard, set_random_seed
 
 
 def main():
@@ -22,29 +22,29 @@ def main():
                       model_path='models/vgg11_bn-6002323d.pth',
                       device=device)
 
-    # faster_rcnn = FasterRCNN(name='FasterRCNN',
-    #                          anchors=[[45, 90], [64, 64], [90, 45],
-    #                                   [90, 180], [128, 128], [180, 90],
-    #                                   [180, 360], [256, 256], [360, 180],
-    #                                   [360, 720], [512, 512], [720, 360]],
-    #                          backbone=VGG,
-    #                          device=device)
-
     faster_rcnn = FasterRCNN(name='FasterRCNN',
-                             anchors=[[38.7346, 63.9380],
-                                      [64.1715, 175.1229],
-                                      [112.8695, 340.1479],
-                                      [123.4950, 100.2833],
-                                      [212.2724, 189.5562],
-                                      [215.3095, 351.9713],
-                                      [232.9199, 590.1595],
-                                      [365.2326, 410.2795],
-                                      [435.3557, 659.2862],
-                                      [520.1739, 238.6301],
-                                      [659.8110, 446.5352],
-                                      [710.3906, 715.7178]],
+                             anchors=[[45, 90], [64, 64], [90, 45],
+                                      [90, 180], [128, 128], [180, 90],
+                                      [180, 360], [256, 256], [360, 180],
+                                      [360, 720], [512, 512], [720, 360]],
                              backbone=VGG,
                              device=device)
+
+    # faster_rcnn = FasterRCNN(name='FasterRCNN',
+    #                          anchors=[[38.7346, 63.9380],
+    #                                   [64.1715, 175.1229],
+    #                                   [112.8695, 340.1479],
+    #                                   [123.4950, 100.2833],
+    #                                   [212.2724, 189.5562],
+    #                                   [215.3095, 351.9713],
+    #                                   [232.9199, 590.1595],
+    #                                   [365.2326, 410.2795],
+    #                                   [435.3557, 659.2862],
+    #                                   [520.1739, 238.6301],
+    #                                   [659.8110, 446.5352],
+    #                                   [710.3906, 715.7178]],
+    #                          backbone=VGG,
+    #                          device=device)
 
     # faster_rcnn = FasterRCNN(anchors=[[233.1948, 570.4430],
     #                                   [103.9305, 419.0243],
@@ -65,12 +65,15 @@ def main():
     #                          device=device)
     faster_rcnn.to(device)
 
-    train_data = PascalDatasetImage(root_dir='../../../Data/VOCdevkit/VOC2012/',
+    train_data = PascalDatasetImage(root_dir=['../../../Data/VOCdevkit/VOC2012/'],
+                                    # '../../../Data/VOCdevkit/VOC2012/'],
                                     classes='../../../Data/VOCdevkit/voc.names',
-                                    dataset='train',
+                                    # dataset=['trainval', 'trainval'],
+                                    dataset=['train'],
+                                    skip_difficult=False,
                                     skip_truncated=False,
-                                    mu=[0.458, 0.438, 0.405],
-                                    sigma=[0.247, 0.242, 0.248],
+                                    mu=[0.458, 0.438, 0.405],  # Maybe reverse the order?
+                                    sigma=[0.247, 0.242, 0.248],  # A bit high?
                                     do_transforms=True,
                                     return_targets=True
                                     )
@@ -101,14 +104,16 @@ def main():
         if joint:
             plist = [{'params': faster_rcnn.parameters()}]
             optimizer = optim.SGD(plist, lr=1e-3, momentum=0.9, weight_decay=1e-4, nesterov=True)
+            # optimizer = optim.Adam(plist, lr=1e-3, weight_decay=1e-4)
+            scheduler = step_decay_scheduler(optimizer, steps=[-1, 2000, 60000, 90000], scales=[.1, 10., 0.1, 0.1])
 
             faster_rcnn.joint_training(train_data=train_data,
                                        val_data=None,
                                        optimizer=optimizer,
-                                       scheduler=None,
-                                       epochs=2,
+                                       scheduler=scheduler,
+                                       epochs=20,
                                        shuffle=True,
-                                       checkpoint_frequency=1
+                                       checkpoint_frequency=5
                                        )
 
         else:
@@ -130,10 +135,12 @@ def main():
         torch.random.manual_seed(12345)
         np.random.seed(12345)
 
+        faster_rcnn = pickle.load(open('models/FasterRCNN20.pkl', 'rb'))
+
         faster_rcnn.predict(dataset=test_data,
-                            confidence_threshold=0.1,
-                            overlap_threshold=.45,
-                            show=True,
+                            confidence_threshold=0.001,
+                            overlap_threshold=.3,
+                            show=False,
                             export=True
                             )
 

@@ -5,6 +5,7 @@ import numpy as np
 import xml.etree.ElementTree as Et
 import torch
 import csv
+from functools import reduce
 
 
 NUM_WORKERS = 0
@@ -511,3 +512,19 @@ def set_random_seed(x):
     np.random.seed(x)
     torch.random.manual_seed(x)
     random.seed(x)
+
+
+def step_decay_scheduler(optimizer, steps=None, scales=None):
+    if steps is None or scales is None:
+        steps = [-1, 100]
+        scales = [0.1, 10.]
+
+    def foo(e):
+        if e < min(steps):
+            return 1.
+        for i, s in enumerate(reversed(steps)):
+            if e >= s:
+                return reduce(lambda x, y: x * y, scales[:len(steps) - i])
+    scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=foo)
+
+    return scheduler

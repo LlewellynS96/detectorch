@@ -20,7 +20,7 @@ NETWORK_STRIDE = 16
 RPN_HI_THRESHOLD = 0.7
 RPN_LO_THRESHOLD = 0.3
 FRCN_HI_THRESHOLD = 0.5
-FRCN_LO_LO_THRESHOLD = 0.01
+FRCN_LO_LO_THRESHOLD = 0.
 FRCN_LO_HI_THRESHOLD = 0.5
 RPN_POS_RATIO = 0.5
 FRCN_POS_RATIO = 0.25
@@ -67,7 +67,14 @@ class FastRCNN(nn.Module):
         self.device = device
         self.backbone = backbone
         self.reg = nn.Linear(backbone.out_features, self.num_classes * 4)
+        self.reg.weight.data.normal_(0., 0.01)
+        self.reg.bias.data.fill_(0)
+
         self.cls = nn.Linear(backbone.out_features, self.num_classes + 1)
+        self.cls.weight.data.normal_(0., 0.01)
+        self.cls.bias.data.fill_(0)
+
+        self.batch_size = -1
 
         self.to(device)
 
@@ -164,7 +171,7 @@ class FastRCNN(nn.Module):
                         pos_mask[abs_max_iou] = 1  # Added ROI with maximum IoU to pos samples.
                         pos_mask = torch.nonzero(pos_mask)
                         neg_mask = torch.nonzero((FRCN_LO_LO_THRESHOLD < max_iou) *
-                                                      (max_iou < FRCN_LO_HI_THRESHOLD))
+                                                 (max_iou < FRCN_LO_HI_THRESHOLD))
                         if neg_mask.numel() > 0:
                             samples = random_choice(neg_mask, roi_batch_size, replace=True)
                         else:
@@ -190,50 +197,88 @@ class FastRCNN(nn.Module):
                     loss['total'].backward()
                     torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=5., norm_type='inf')
                     optimizer.step()
-                    inner.set_postfix_str(' FRCN Training Loss: {:.6f}'.format(np.mean(batch_loss)))
+                    inner.set_postfix_str(' FRCN Training Loss: {:.5f}'.format(np.mean(batch_loss)))
                     inner.update()
                 train_loss.append(np.mean(batch_loss))
                 if val_data is not None:
                     val_data.reset_image_size()
                     val_loss.append(self.calculate_loss(val_data, backbone, rpn, 128))
-                    inner.set_postfix_str(' FRCN Training Loss: {:.6f},  FRCN Validation Loss: {:.6f}'
+                    inner.set_postfix_str(' FRCN Training Loss: {:.5f},  FRCN Validation Loss: {:.5f}'
                                           .format(train_loss[-1], val_loss[-1]))
                 else:
-                    inner.set_postfix_str(' FRCN Training Loss: {:.6f}'.format(train_loss[-1]))
+                    inner.set_postfix_str(' FRCN Training Loss: {:.5f}'.format(train_loss[-1]))
                 with open('loss_frcn.txt', 'a') as fl:
-                    fl.writelines('Epoch {}: FRCN Training Loss: {:.6f}\n'.format(epoch,
+                    fl.writelines('Epoch {}: FRCN Training Loss: {:.5f}\n'.format(epoch,
                                                                                   train_loss[-1]))
             if scheduler is not None:
                 scheduler.step()
 
         return train_loss, val_loss
 
-    def loss(self, reg, cls, target_reg, target_cls, stats, focal=False):
+    def sample(self, images_bboxes, rois, stats):
+        if len(images_bboxes) > 0:
+            ious = jaccard(rois, images_bboxes)
+            max_iou, argmax_iou = torch.max(ious, dim=1)
+            pos_mask = max_iou > FRCN_HI_THRESHOLD
+            abs_max_iou, abs_argmax_iou = torch.max(ious, dim=0)
+            stats['avg_frcn_iou'].append(abs_max_iou.mean().item())
+            pos_mask[abs_argmax_iou] = True  # Added ROI with maximum IoU to pos samples.
+            pos_mask = torch.nonzero(pos_mask)
+            neg_mask = torch.nonzero((FRCN_LO_LO_THRESHOLD <= max_iou) * (max_iou <= FRCN_LO_HI_THRESHOLD))
+            samples, n_p, _ = sample_ids(self.batch_size, pos_mask, neg_mask, FRCN_POS_RATIO)
+            roi_match = argmax_iou[samples[:n_p]]
+        else:
+            stats['avg_frcn_iou'].append(0.)
+            samples = torch.randperm(len(rois))[:self.batch_size]
+            roi_match = []
+
+        return samples, roi_match
+
+    def loss(self, reg, cls, target_bboxes, target_classes, rois, stats):
+        assert reg.shape[0] == 1
+        assert cls.shape[0] == 1
 
         loss = dict()
-        lambd = 1. / cls.shape[0] / cls.shape[1]
-        target = torch.argmax(target_cls, dim=-1).flatten()
 
-        if focal:
-            loss['cls'] = lambd * FocalLoss(reduction='sum', gamma=1.0)(cls.view(-1, self.num_classes + 1), target)
+        reg = reg[0]
+        cls = cls[0]
+
+        num_obj = len(target_bboxes)
+
+        if num_obj > 0:
+            target_reg = parameterize_bboxes(target_bboxes,
+                                             rois[:num_obj])
+
+        target_cls = torch.zeros(self.batch_size, self.num_classes + 1, device=self.device)
+        if num_obj > 0:
+            target_cls[:num_obj] = target_classes
+        target_cls[num_obj:, 0] = 1.
+
+        target_cls = torch.argmax(target_cls, dim=-1)
+        obj_mask = torch.nonzero(target_cls > 0)[:, 0]
+
+        lambd = 1. / cls.shape[0]
+
+        cls = F.log_softmax(cls, dim=-1)
+        loss['cls'] = lambd * nn.NLLLoss(reduction='sum')(cls, target_cls)
+
+        arange = torch.arange(num_obj)
+        if num_obj > 0:
+            stats['avg_frcn_class'].append(torch.exp(cls[:num_obj][arange, target_cls[:num_obj]]).mean().item())
         else:
-            loss['cls'] = lambd * nn.CrossEntropyLoss(reduction='sum')(cls.view(-1, self.num_classes + 1), target)
+            stats['avg_frcn_class'].append(0.)
+        stats['avg_frcn_background'].append(torch.exp(cls[num_obj:, 0]).mean().item())
 
-        lambd = 5. / cls.shape[0] / cls.shape[1]
-
-        obj_mask = torch.nonzero(target_cls[:, :, 0] == 0)
-        arange = torch.arange(len(obj_mask))
-        obj_mask = tuple(obj_mask.t())
-        if len(obj_mask) > 0:
-            cls = torch.argmax(target_cls, dim=-1) - 1
-            loss['reg'] = 4. * lambd * nn.SmoothL1Loss(reduction='sum')(reg[obj_mask][arange, cls[obj_mask]],
+        if num_obj > 0:
+            cls = (target_cls - 1)[obj_mask]
+            loss['reg'] = lambd * nn.SmoothL1Loss(reduction='sum')(reg[obj_mask, cls],
                                                                         target_reg[obj_mask])
         else:
             loss['reg'] = 0.
 
         loss['total'] = loss['cls'] + loss['reg']
 
-        return loss
+        return loss, stats
 
     def calculate_loss(self, data, backbone, rpn, roi_batch_size=256, fraction=0.01):
         """
@@ -295,7 +340,7 @@ class FastRCNN(nn.Module):
                         pos_mask[abs_max_iou] = 1  # Added ROI with maximum IoU to pos samples.
                         pos_mask = torch.nonzero(pos_mask)
                         neg_mask = torch.nonzero((FRCN_LO_LO_THRESHOLD < max_iou) *
-                                                      (max_iou < FRCN_LO_HI_THRESHOLD))
+                                                 (max_iou < FRCN_LO_HI_THRESHOLD))
                         if neg_mask.numel() > 0:
                             samples = random_choice(neg_mask, roi_batch_size, replace=True)
                         else:
@@ -410,6 +455,9 @@ class RPN(nn.Module):
                                          kernel_size=3,
                                          stride=1,
                                          padding=1)
+        self.sliding_windows.weight.data.normal_(0., 0.01)
+        self.sliding_windows.bias.data.fill_(0)
+
         self.cls = nn.Conv2d(in_channels=self.num_features,
                              out_channels=2 * self.num_anchors,
                              kernel_size=1)
@@ -421,6 +469,8 @@ class RPN(nn.Module):
                              kernel_size=1)
         self.reg.weight.data.normal_(0., 0.01)
         self.reg.bias.data.fill_(0)
+
+        self.batch_size = -1
 
         self.to(device)
 
@@ -436,22 +486,18 @@ class RPN(nn.Module):
 
         return reg, cls
 
-    def post_process(self, reg, cls, grid_size, max_rois=2000, nms=False):
+    def post_process(self, reg, cls, anchors, max_rois=2000, nms=False):
         assert reg.shape[0] == 1
         assert cls.shape[0] == 1
 
         reg = reg[0]
         cls = cls[0]
 
-        anchors = self.construct_anchors(grid_size)
         classes = F.softmax(cls, dim=-1)
-        valid = self.validate_anchors(anchors)
-        classes = classes[valid]
-        anchors = anchors[valid]
 
         keep = torch.nonzero(classes[:, 0] > 0.).flatten()  # [REMOVED] Ignore all proposals wit low probabilities
         classes = classes[keep]
-        bboxes = deparameterize_bboxes(reg[valid][keep], anchors[keep])
+        bboxes = deparameterize_bboxes(reg[keep], anchors[keep])
         bboxes = torch.clamp(bboxes, min=0., max=1.)
 
         keep = np.nonzero(bboxes[:, 2] - bboxes[:, 0]).squeeze()
@@ -487,9 +533,9 @@ class RPN(nn.Module):
         anchors[yy, xx, :, 2:] = self.anchors / 2. + .5
 
         anchors[:, x, :, ::2] += x_coords
-        anchors[:, x, :, ::2] /= grid_size[1].float()
+        anchors[:, x, :, ::2] /= float(grid_size[1])
         anchors[y, :, :, 1::2] += y_coords
-        anchors[y, :, :, 1::2] /= grid_size[0].float()
+        anchors[y, :, :, 1::2] /= float(grid_size[0])
 
         anchors = anchors.reshape(-1, 4)
 
@@ -568,42 +614,80 @@ class RPN(nn.Module):
                         loss['total'].backward()
                         torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=.5, norm_type='inf')
                         optimizer.step()
-                        inner.set_postfix_str(' RPN Training Loss: {:.6f}'.format(np.mean(image_loss)))
+                        inner.set_postfix_str(' RPN Training Loss: {:.5f}'.format(np.mean(image_loss)))
                     inner.update()
                 train_loss.append(np.mean(image_loss))
                 if val_data is not None:
                     val_data.reset_image_size()
                     val_loss.append(self.calculate_loss(val_data, backbone, batch_size))
-                    inner.set_postfix_str(' RPN Training Loss: {:.6f},  RPN Validation Loss: {:.6f}'
+                    inner.set_postfix_str(' RPN Training Loss: {:.5f},  RPN Validation Loss: {:.5f}'
                                           .format(train_loss[-1], val_loss[-1]))
                 else:
-                    inner.set_postfix_str(' RPN Training Loss: {:.6f}'.format(train_loss[-1]))
+                    inner.set_postfix_str(' RPN Training Loss: {:.5f}'.format(train_loss[-1]))
                 with open('loss_rpn.txt', 'a') as fl:
-                    fl.writelines('Epoch {}: RPN Training Loss: {:.6f}\n'.format(epoch,
+                    fl.writelines('Epoch {}: RPN Training Loss: {:.5f}\n'.format(epoch,
                                                                                  train_loss[-1]))
             if scheduler is not None:
                 scheduler.step()
 
         return train_loss, val_loss
 
-    @staticmethod
-    def loss(reg, cls, target_reg, target_cls, stats, focal=False):
-
-        loss = dict()
-        target_cls = torch.argmax(target_cls, dim=-1)
-
-        if focal:
-            loss['cls'] = FocalLoss(reduction='sum')(cls, target_cls)
+    def sample(self, target_bboxes, anchors, stats):
+        if len(target_bboxes) > 0:
+            ious = jaccard(anchors, target_bboxes)
+            max_iou, argmax_iou = torch.max(ious, dim=1)
+            pos_mask = max_iou > RPN_HI_THRESHOLD
+            abs_max_iou, abs_argmax_iou = torch.max(ious, dim=0)
+            print(abs_max_iou)
+            stats['avg_rpn_iou'].append(abs_max_iou.mean().item())
+            pos_mask[abs_argmax_iou] = True
+            neg_mask = torch.nonzero((max_iou < RPN_LO_THRESHOLD) * (~pos_mask))
+            pos_mask = torch.nonzero(pos_mask)
+            samples, n_p, _ = sample_ids(self.batch_size, pos_mask, neg_mask, RPN_POS_RATIO)
+            anchor_match = argmax_iou[samples[:n_p]]
         else:
-            loss['cls'] = nn.CrossEntropyLoss(reduction='sum')(cls, target_cls)
-        loss['cls'] /= cls.shape[0]
+            stats['avg_rpn_iou'].append(0.)
+            samples = torch.randperm(len(anchors))[:self.batch_size]
+            anchor_match = []
 
-        loss['reg'] = nn.SmoothL1Loss(reduction='sum')(reg,
-                                                       target_reg)
-        loss['reg'] /= cls.shape[0]
+        return samples, anchor_match
+
+    def loss(self, reg, cls, target_bboxes, anchors, stats):
+        loss = dict()
+
+        cls = cls[0].clone()
+        reg = reg[0].clone()
+
+        num_obj = len(target_bboxes)
+
+        target_cls = torch.zeros(self.batch_size, 2, device=self.device)
+        target_cls[:num_obj, 0] = 1.
+        target_cls[num_obj:, 1] = 1.
+
+        lambd = 1. / cls.shape[0]
+
+        target_cls = torch.argmax(target_cls, dim=-1)
+        cls = F.log_softmax(cls, dim=-1)
+        loss['cls'] = lambd * nn.NLLLoss(reduction='sum')(cls, target_cls)
+        if num_obj > 0:
+            stats['avg_rpn_obj'].append(torch.exp(cls[:num_obj, 0]).mean().item())
+        else:
+            stats['avg_rpn_obj'].append(0.)
+        stats['avg_rpn_noobj'].append(torch.exp(cls[num_obj:, 1]).mean().item())
+
+        if num_obj > 0:
+            obj_mask = torch.nonzero(target_cls == 0)[:, 0]
+
+            target_reg = parameterize_bboxes(target_bboxes, anchors[obj_mask])
+
+            loss['reg'] = lambd * nn.SmoothL1Loss(reduction='sum')(reg[obj_mask],
+                                                           target_reg)
+        else:
+            loss['reg'] = 0.
 
         loss['total'] = loss['cls'] + loss['reg']
-        return loss
+
+        return loss, stats
 
     def calculate_loss(self, data, backbone, batch_size=256, fraction=0.01):
         """
@@ -705,11 +789,16 @@ class FasterRCNN(nn.Module):
 
         self.device = device
 
-    def forward(self, x):
+    def forward(self, x, max_rois=300):
         features = self.fast_rcnn.backbone.features(x)
         reg, cls = self.rpn(features)
-        grid_size = torch.tensor(features.shape[-2:], device=self.device)
-        rois, _ = self.rpn.post_process(reg, cls, grid_size, max_rois=MAX_TEST_RPN_ROIS, nms=True)
+        grid_size = features.shape[-2:]
+        anchors = self.rpn.construct_anchors(grid_size)
+        valid = self.rpn.validate_anchors(anchors)  # This has the effect of scrambling anchors
+        reg = reg[:, valid]
+        cls = cls[:, valid]
+        anchors = anchors[valid]
+        rois, _ = self.rpn.post_process(reg, cls, anchors, max_rois=max_rois, nms=True)
         reg, cls = self.fast_rcnn(features, rois, extract_features=False)
         bboxes, classes = self.fast_rcnn.post_process(reg, cls, rois)
 
@@ -776,7 +865,8 @@ class FasterRCNN(nn.Module):
                     classes_.append(classes)
                     image_idx_.append([ids] * len(bboxes))
 
-                    pbar.update()
+                    if pbar is not None:
+                        pbar.update()
 
             if len(bboxes_) > 0:
                 bboxes = torch.cat(bboxes_).view(-1, 4)
@@ -929,6 +1019,9 @@ class FasterRCNN(nn.Module):
 
         self.train()
 
+        self.rpn.batch_size = rpn_batch_size
+        self.fast_rcnn.batch_size = frcn_batch_size
+
         train_dataloader = DataLoader(dataset=train_data,
                                       shuffle=shuffle,
                                       num_workers=NUM_WORKERS)
@@ -937,7 +1030,12 @@ class FasterRCNN(nn.Module):
         val_loss = []
 
         for epoch in range(1, epochs + 1):
-            stats = {'avg_obj_iou': [], 'avg_class': [], 'avg_pobj': [], 'avg_pnoobj': []}
+            stats = {'avg_rpn_iou': [],
+                     'avg_frcn_iou': [],
+                     'avg_rpn_obj': [],
+                     'avg_frcn_class': [],
+                     'avg_rpn_noobj': [],
+                     'avg_frcn_background': []}
             rpn_loss = []
             frcn_loss = []
             with tqdm(total=len(train_dataloader),
@@ -951,93 +1049,94 @@ class FasterRCNN(nn.Module):
                     if inner.n % image_batch_size == 0:
                         optimizer.zero_grad()
                     features = self.fast_rcnn.backbone.features(images)
-                    if images_bboxes.numel() > 0:
-                        reg, cls = self.rpn(features)
-                        cls_og = cls.clone()
-                        reg_og = reg.clone()
-                        grid_size = torch.tensor(features.shape[-2:], device=self.device)
-                        anchors = self.rpn.construct_anchors(grid_size)
-                        valid = self.rpn.validate_anchors(anchors)  # This has the effect of scrambling anchors
-                        cls = cls[0][valid]
-                        reg = reg[0][valid]
-                        anchors = anchors[valid]
-                        ious = jaccard(anchors, images_bboxes)
-                        max_iou, argmax_iou = torch.max(ious, dim=1)
-                        pos_mask = max_iou > RPN_HI_THRESHOLD
-                        abs_max_iou = torch.argmax(ious, dim=0)
-                        pos_mask[abs_max_iou] = True
-                        neg_mask = torch.nonzero((max_iou < RPN_LO_THRESHOLD) * (~pos_mask))
-                        pos_mask = torch.nonzero(pos_mask)
-                        samples, n_p, n_n = sample_ids(rpn_batch_size, pos_mask, neg_mask, RPN_POS_RATIO)
-                        target_cls = torch.zeros(rpn_batch_size, 2, device=self.device)
-                        target_cls[:n_p, 0] = 1.
-                        target_cls[-n_n:, 1] = 1.
-                        images_bboxes_ = images_bboxes[argmax_iou][samples[:n_p]]
-                        target_reg = parameterize_bboxes(images_bboxes_, anchors[samples[:n_p]])
-                        reg = reg[samples[:n_p]]
-                        cls = cls[samples]
-                        loss = self.rpn.loss(reg, cls, target_reg, target_cls, stats)
-                        rpn_loss.append(loss['total'].item())
-                        loss['total'].backward(retain_graph=True)
-                        # FRCN
-                        rois = self.rpn.post_process(reg_og, cls_og, grid_size, MAX_TRAIN_RPN_ROIS, True)[0]
-                        ious = jaccard(rois, images_bboxes)
-                        max_iou, argmax_iou = torch.max(ious, dim=1)
-                        pos_mask = max_iou > FRCN_HI_THRESHOLD
-                        abs_max_iou = torch.argmax(ious, dim=0)
-                        pos_mask[abs_max_iou] = 1  # Added ROI with maximum IoU to pos samples.
-                        pos_mask = torch.nonzero(pos_mask)
-                        neg_mask = torch.nonzero((FRCN_LO_LO_THRESHOLD < max_iou) * (max_iou < FRCN_LO_HI_THRESHOLD))
-                        samples, n_p, n_n = sample_ids(frcn_batch_size, pos_mask, neg_mask, FRCN_POS_RATIO)
-                        frcn_target_rois = rois[samples]
-                        frcn_target_classes = torch.zeros(frcn_batch_size, self.num_classes + 1, device=self.device)
-                        frcn_target_classes[:n_p] = images_classes[argmax_iou[samples[:n_p]]]
-                        frcn_target_classes[-n_n:, 0] = 1.
-                        target_bboxes = parameterize_bboxes(images_bboxes[argmax_iou[samples[:n_p]]],
-                                                            rois[samples[:n_p]])
-                    reg, cls = self.fast_rcnn(features, frcn_target_rois, extract_features=False)
-                    reg = reg[:n_p]
-                    loss = self.fast_rcnn.loss(reg, cls, target_bboxes[None].detach(), frcn_target_classes[None].detach(), stats)
+                    reg, cls = self.rpn(features)
+                    grid_size = features.shape[-2:]
+                    anchors = self.rpn.construct_anchors(grid_size)
+                    valid = self.rpn.validate_anchors(anchors)  # This has the effect of scrambling anchors
+                    reg = reg[:, valid]
+                    cls = cls[:, valid]
+                    anchors = anchors[valid]
+                    samples, roi_match = self.rpn.sample(images_bboxes, anchors, stats)
+                    loss, stats = self.rpn.loss(reg[:, samples],
+                                                cls[:, samples],
+                                                images_bboxes[roi_match],
+                                                anchors[samples].detach(),
+                                                stats)
+                    rpn_loss.append(loss['total'].item())
+                    loss['total'].backward(retain_graph=True)
+                    # FRCN
+                    rois = self.rpn.post_process(reg, cls, anchors, MAX_TRAIN_RPN_ROIS, True)[0]
+                    samples, roi_match = self.fast_rcnn.sample(images_bboxes, rois, stats)
+                    rois = rois[samples]
+                    reg, cls = self.fast_rcnn(features, rois.detach(), extract_features=False)
+                    images_bboxes = images_bboxes[roi_match]
+                    images_classes = images_classes[roi_match]
+                    loss, stats = self.fast_rcnn.loss(reg, cls, images_bboxes, images_classes, rois.detach(), stats)
                     frcn_loss.append(loss['total'].item())
                     loss['total'].backward()
 
                     weights = np.arange(1, 1 + len(frcn_loss))
-                    disp_str = ' RPN Training Loss: {:.6f}, '.format(np.average(rpn_loss, weights=weights)) + \
-                               ' FRCN Training Loss: {:.6f}, '.format(np.average(frcn_loss, weights=weights)) + \
-                               ' Avg IOU: {:.4f},  '.format(np.average(stats['avg_obj_iou'], weights=weights)) + \
-                               ' Avg P|Obj: {:.4f},  '.format(np.average(stats['avg_pobj'], weights=weights)) + \
-                               ' Avg P|Noobj: {:.4f},  '.format(np.average(stats['avg_pnoobj'], weights=weights)) + \
-                               ' Avg Class: {:.4f}, '.format(np.average(stats['avg_class'], weights=weights)) + \
-                               ' Iteration: {:d}'.format(self.iteration)
+                    disp_str = ' Training Loss (R/F): ' \
+                               '{:.5f}/{:.5f}, '.format(np.average(rpn_loss, weights=weights),
+                                                        np.average(frcn_loss, weights=weights)) + \
+                               ' Avg IOU (R/F): ' \
+                               '{:.3f}/{:.3f},  '.format(np.average(stats['avg_rpn_iou'], weights=weights),
+                                                         np.average(stats['avg_frcn_iou'], weights=weights)) + \
+                               ' Avg Class (R/F): ' \
+                               '{:.3f}/{:.3f},  '.format(np.average(stats['avg_rpn_obj'], weights=weights),
+                                                         np.average(stats['avg_frcn_class'], weights=weights)) + \
+                               ' Avg P|Noobj: ' \
+                               '{:.3f}/{:.3f}'.format(np.average(stats['avg_rpn_noobj'], weights=weights),
+                                                         np.average(stats['avg_frcn_background'], weights=weights))
                     inner.set_postfix_str(disp_str)
                     torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=1., norm_type='inf')  # ???
                     if (inner.n + 1) % image_batch_size == 0:
                         optimizer.step()
                         if scheduler is not None:
                             scheduler.step()
-                            self.iteration += 1
+                        self.iteration += 1
                     inner.update()
                 train_loss.append([np.average(rpn_loss, weights=weights), np.average(frcn_loss, weights=weights)])
                 if val_data is not None:
                     val_data.reset_image_size()
                     val_loss.append(self.calculate_loss(val_data, roi_batch_size))
-                    inner.set_postfix_str(' RPN Training Loss: {:.6f},  '
-                                          'FRCN Training Loss: {:.6f},  '
-                                          'RPN Validation Loss: {:.6f},  '
-                                          'FRCN Validation Loss: {:.6f}'.format(train_loss[-1][0],
+                    disp_str = ' Training Loss (R/F): ' \
+                               '{:.5f}/{:.5f}, '.format(np.average(rpn_loss, weights=weights),
+                                                        np.average(frcn_loss, weights=weights)) + \
+                               ' Avg IOU (R/F): ' \
+                               '{:.3f}/{:.3f},  '.format(np.average(stats['avg_rpn_iou'], weights=weights),
+                                                         np.average(stats['avg_frcn_iou'], weights=weights)) + \
+                               ' Avg Class (R/F): ' \
+                               '{:.3f}/{:.3f},  '.format(np.average(stats['avg_rpn_obj'], weights=weights),
+                                                         np.average(stats['avg_frcn_class'], weights=weights)) + \
+                               ' Avg P|Noobj: ' \
+                               '{:.3f}/{:.3f}'.format(np.average(stats['avg_rpn_noobj'], weights=weights),
+                                                      np.average(stats['avg_frcn_background'], weights=weights))
+                    with open('training_loss.txt', 'a') as fl:
+                        fl.writelines('Epoch: {} '.format(epoch) + disp_str + '\n')
+                    inner.set_postfix_str(' RPN Training Loss: {:.5f},  '
+                                          'FRCN Training Loss: {:.5f},  '
+                                          'RPN Validation Loss: {:.5f},  '
+                                          'FRCN Validation Loss: {:.5f}'.format(train_loss[-1][0],
                                                                                 train_loss[-1][1],
                                                                                 val_loss[-1][0],
                                                                                 val_loss[-1][1]))
                 else:
-                    inner.set_postfix_str(' RPN Training Loss: {:.6f},  FRCN Training Loss: {:.6f}'.format(train_loss[-1][0], train_loss[-1][1]))
-                with open('loss_joint.txt', 'a') as fl:
-                    fl.writelines('Epoch {}: '
-                                  'RPN Training Loss: {:.6f},  '
-                                  'FRCN Training Loss: {:.6f}\n'.format(epoch,
-                                                                        train_loss[-1][0],
-                                                                        train_loss[-1][1]))
-            if scheduler is not None:
-                scheduler.step()
+                    disp_str = ' Training Loss (R/F): ' \
+                               '{:.5f}/{:.5f}, '.format(train_loss[-1][0],
+                                                        train_loss[-1][1]) + \
+                               ' Avg IOU (R/F): ' \
+                               '{:.3f}/{:.3f},  '.format(np.average(stats['avg_rpn_iou'], weights=weights),
+                                                         np.average(stats['avg_frcn_iou'], weights=weights)) + \
+                               ' Avg Class (R/F): ' \
+                               '{:.3f}/{:.3f},  '.format(np.average(stats['avg_rpn_obj'], weights=weights),
+                                                         np.average(stats['avg_frcn_class'], weights=weights)) + \
+                               ' Avg P|Noobj: ' \
+                               '{:.3f}/{:.3f}'.format(np.average(stats['avg_rpn_noobj'], weights=weights),
+                                                      np.average(stats['avg_frcn_background'], weights=weights))
+                    inner.set_postfix_str(disp_str)
+                    with open('training_loss.txt', 'a') as fl:
+                        fl.writelines('Epoch: {} '.format(epoch) + disp_str + '\n')
             if epoch % checkpoint_frequency == 0:
                 self.save_model(self.name + '{}.pkl'.format(epoch))
 
