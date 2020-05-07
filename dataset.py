@@ -5,10 +5,17 @@ import numpy as np
 from torch.utils.data import Dataset
 import torchvision.transforms
 from utils import VGG_MEAN, VGG_STD, SS_MEAN, SS_STD, to_numpy_image, add_bbox_to_image
-from utils import read_classes, get_pascal_annotations, get_ss_annotations
+from utils import read_classes, get_annotations
 from PIL import Image, ImageFilter
 
-SMALL_THRESHOLD = 0.01
+RESIZE = True
+# MIN_TRAIN_SIZE = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
+# MIN_TEST_SIZE = 800
+# MAX_SIZE = 1333
+MIN_TRAIN_SIZE = [600]
+MIN_TEST_SIZE = 600
+MAX_SIZE = 1000
+SMALL_THRESHOLD = 0.005
 
 
 class PascalDatasetImage(Dataset):
@@ -17,7 +24,7 @@ class PascalDatasetImage(Dataset):
     from a PASCAL VOC dataset in a general format that is compatible with
     any arbitrary object detector.
     """
-    def __init__(self, classes, mu, sigma, root_dir='data/VOC2012/', dataset='train', skip_truncated=True,
+    def __init__(self, classes, mu, sigma, train=False, root_dir='data/VOC2012/', dataset='train', skip_truncated=True,
                  do_transforms=False, skip_difficult=True, return_targets=False):
         """
         Initialise the dataset object with some network and dataset specific parameters.
@@ -58,6 +65,8 @@ class PascalDatasetImage(Dataset):
         self.annotations_dir = [os.path.join(r, 'Annotations') for r in self.root_dir]
         self.sets_dir = [os.path.join(r, 'ImageSets', 'Main') for r in self.root_dir]
         self.dataset = dataset
+
+        self.train = train
 
         self.mu = mu
         self.sigma = sigma
@@ -104,29 +113,31 @@ class PascalDatasetImage(Dataset):
 
         """
         dataset, img = self.images[index]
-        # dataset, img = self.images[index % 3 * 9 + 233]
-        # dataset, img = (0, '000026') if index % 2 else (0, '000035')
-        # dataset, img = random.choice([(1, '2007_001558'), (1, '2007_000272'), (1, '2007_000999')])
         image = Image.open(os.path.join(self.images_dir[dataset], img + '.jpg'))
         image_info = {'id': img, 'width': image.width, 'height': image.height, 'dataset': self.dataset[dataset]}
         if self.do_transforms:
             random_flip = np.random.random()
             random_blur = np.random.random()
-            image = torchvision.transforms.ColorJitter(brightness=0.5, contrast=0.5, saturation=0.5, hue=0.1)(image)
-            image = torchvision.transforms.RandomGrayscale(p=0.1)(image)
-            oversize = 0.2
-            image_resize = np.array([image_info['width'], image_info['height']] * np.array((1. + oversize)),
-                                    dtype=np.int)
-            crop_offset = np.random.random(size=1) * oversize * [image_info['width'], image_info['height']]
-            crop_offset = crop_offset.astype(dtype=np.int)
-            image = image.resize(image_resize)
+            image = torchvision.transforms.ColorJitter(brightness=0.25, contrast=0.25, saturation=0.25, hue=0.05)(image)
             if random_flip >= 0.5:
                 image = torchvision.transforms.functional.hflip(image)
             if random_blur >= 0.9:
                 image = image.filter(ImageFilter.GaussianBlur(radius=1))
-            image = torchvision.transforms.functional.crop(image,
-                                                           *crop_offset[::-1],
-                                                           image_info['height'], image_info['width'])
+        if RESIZE:
+            if self.train:
+                size = np.random.choice(MIN_TRAIN_SIZE)
+            else:
+                size = MIN_TEST_SIZE
+            scale = size * 1.0 / min(image.width, image.height)
+            if image.height < image.width:
+                w, h = int(scale * image.width), size
+            else:
+                w, h = size, int(scale * image.height)
+            if max(h, w) > MAX_SIZE:
+                scale = MAX_SIZE * 1.0 / max(h, w)
+                w = int(w * scale)
+                h = int(h * scale)
+            image = image.resize((w, h))
 
         image = torchvision.transforms.ToTensor()(image)
         # ============================= NORMALIZATION =============================
@@ -134,12 +145,16 @@ class PascalDatasetImage(Dataset):
         image = torchvision.transforms.Normalize(mean=self.mu, std=self.sigma)(image)
 
         if self.return_targets:
-            annotations = get_pascal_annotations(self.annotations_dir[dataset], image_info['id'])
+            annotations = get_annotations(self.annotations_dir[dataset], image_info['id'])
             bboxes = []
             classes = []
             # For each object in image.
             for annotation in annotations:
-                name, xmin, ymin, xmax, ymax, truncated, difficult = annotation
+                name, height, width, xmin, ymin, xmax, ymax, truncated, difficult = annotation
+                xmin /= width
+                xmax /= width
+                ymin /= height
+                ymax /= height
                 if (self.skip_truncated and truncated) or (self.skip_difficult and difficult):
                     continue
                 if name not in self.classes:
@@ -149,10 +164,6 @@ class PascalDatasetImage(Dataset):
                         tmp = xmin
                         xmin = 1. - xmax
                         xmax = 1. - tmp
-                    xmin = (xmin * image_resize[0] - crop_offset[0]) / image_info['width']
-                    xmax = (xmax * image_resize[0] - crop_offset[0]) / image_info['width']
-                    ymin = (ymin * image_resize[1] - crop_offset[1]) / image_info['height']
-                    ymax = (ymax * image_resize[1] - crop_offset[1]) / image_info['height']
                 xmin = np.clip(xmin, a_min=0, a_max=1)
                 xmax = np.clip(xmax, a_min=0, a_max=1)
                 ymin = np.clip(ymin, a_min=0, a_max=1)

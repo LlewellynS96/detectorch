@@ -6,6 +6,7 @@ import xml.etree.ElementTree as Et
 import torch
 import csv
 from functools import reduce
+from time import time
 
 
 NUM_WORKERS = 0
@@ -39,7 +40,7 @@ def read_classes(file):
     return classes
 
 
-def get_pascal_annotations(annotations_dir, img):
+def get_annotations(annotations_dir, img):
     """
     Collects all the annotations for a specific image in any of the
     Pascal VOC datasets.
@@ -75,44 +76,12 @@ def get_pascal_annotations(annotations_dir, img):
         name = obj.find('name').text
         truncated = int(obj.find('truncated').text)
         difficult = int(obj.find('difficult').text)
-        # NOTE: The creators of the Pascal VOC dataset started counting at 1,
-        # and thus the indices have to be corrected.
-        xmin = (float(bbox.find('xmin').text) - 1.) / width
-        xmax = (float(bbox.find('xmax').text) - 1.) / width
-        ymin = (float(bbox.find('ymin').text) - 1.) / height
-        ymax = (float(bbox.find('ymax').text) - 1.) / height
-        annotations.append((name, xmin, ymin, xmax, ymax, truncated, difficult))
 
-    return annotations
-
-
-def get_ss_annotations(annotations_dir, img):
-    file = os.path.join(annotations_dir, img + '.csv')
-    rows = []
-
-    with open(file, mode='r') as csv_file:
-        csv_reader = csv.DictReader(csv_file)
-        for row in csv_reader:
-            rows.append(row)
-
-    annotations = []
-
-    for obj in rows:
-        signal_type = obj['signal_type']
-        truncated = obj['truncated']
-        xmin = float(obj['xmin'])
-        ymin = float(obj['ymin'])
-        xmax = float(obj['xmax'])
-        ymax = float(obj['ymax'])
-        snr = float(obj['snr'])
-        max_overlap = float(obj['max_overlap'])
-        if snr < 0:
-            difficult = True
-        elif max_overlap > 0.5:
-            difficult = True
-        else:
-            difficult = False
-        annotations.append((signal_type, xmin, ymin, xmax, ymax, truncated, difficult))
+        xmin = float(bbox.find('xmin').text)
+        xmax = float(bbox.find('xmax').text)
+        ymin = float(bbox.find('ymin').text)
+        ymax = float(bbox.find('ymax').text)
+        annotations.append((name, height, width, xmin, ymin, xmax, ymax, truncated, difficult))
 
     return annotations
 
@@ -324,7 +293,7 @@ def xywh2xyxy(xywh):
     return xyxy
 
 
-def parameterize_bboxes(bboxes, anchors):
+def parameterize_bboxes(bboxes, anchors_xywh):
     """
     Parameterizes bounding boxes according to the R-CNN conventions
     given the coordinates for the bounding boxes and their
@@ -346,11 +315,10 @@ def parameterize_bboxes(bboxes, anchors):
         box parameters of :math:`N` bounding boxes in the format
         :math:`(t_x, t_y, t_w, t_h)`.
     """
-    assert bboxes.shape == anchors.shape
+    assert bboxes.shape == anchors_xywh.shape
     assert bboxes.shape[-1] == 4
 
     bboxes_xywh = xyxy2xywh(bboxes)
-    anchors_xywh = xyxy2xywh(anchors)
 
     bboxes_xywh[:, :2] = (bboxes_xywh[:, :2] - anchors_xywh[:, :2]) / anchors_xywh[:, 2:]
     bboxes_xywh[:, 2:] = torch.log(bboxes_xywh[:, 2:] / anchors_xywh[:, 2:])
@@ -358,7 +326,7 @@ def parameterize_bboxes(bboxes, anchors):
     return bboxes_xywh
 
 
-def deparameterize_bboxes(reg, anchors):
+def deparameterize_bboxes(reg, anchors_xywh):
     """
     Parameterizes bounding boxes according to the R-CNN conventions
     given the coordinates for the bounding boxes and their
@@ -369,9 +337,9 @@ def deparameterize_bboxes(reg, anchors):
         A Tensor whose shape is :math:`(N, 4)` representing the R-CNN bounding
         box parameters of :math:`N` bounding boxes in the format
         :math:`(t_x, t_y, t_w, t_h)`.
-    anchors : Tensor
+    anchors_xywh : Tensor
         A Tensor whose shape is :math:`(N, 4)` representing the coordinates
-        of the :math:`N` anchors in the format (x1, y1, x2, y2) that correspond
+        of the :math:`N` anchors in the format (x, y, w, h) that correspond
         to the different bounding boxes.
 
     Returns
@@ -380,11 +348,10 @@ def deparameterize_bboxes(reg, anchors):
         A Tensor whose shape is :math:`(N, 4)` representing the coordinates
         of :math:`N` bounding boxes in the format (x1, y1, x2, y2).
     """
-    assert reg.shape == anchors.shape
-    assert anchors.shape[-1] == 4
+    assert reg.shape == anchors_xywh.shape
+    assert reg.shape[-1] == 4
 
-    anchors_xywh = xyxy2xywh(anchors)
-    bboxes_xywh = torch.zeros_like(anchors)
+    bboxes_xywh = torch.zeros_like(anchors_xywh)
 
     bboxes_xywh[:, :2] = reg[:, :2] * anchors_xywh[:, 2:] + anchors_xywh[:, :2]
     bboxes_xywh[:, 2:] = torch.exp(reg[:, 2:]) * anchors_xywh[:, 2:]
