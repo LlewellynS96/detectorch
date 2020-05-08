@@ -54,11 +54,14 @@ class ResNetBackbone(nn.Module):
                                         self.model.layer1,
                                         self.model.layer2,
                                         self.model.layer3])
+        self.model.layer4[0].conv2.stride = 1
+        self.model.layer4[0].downsample[0].stride = 1
         self.classifier = nn.Sequential(*[self.model.layer4,
                                           self.model.avgpool
                                           ])
 
         self.channels = 1024
+        self.roi_pool_size = (7, 7)
         self.classifier_in_shape = (-1, self.channels, 7, 7)
         self.out_features = 2048
 
@@ -104,6 +107,7 @@ class VGGBackbone(nn.Module):
         self.classifier = self.model.classifier
 
         self.channels = 512
+        self.roi_pool_size = (7, 7)
         self.classifier_in_shape = (1, -1, self.channels * 7 * 7)
         self.out_features = 4096
 
@@ -152,14 +156,15 @@ class FastRCNN(nn.Module):
         rois_idxs = rois.clone()
         rois_idxs[:, ::2] *= grid_size[1]
         rois_idxs[:, 1::2] *= grid_size[0]
-        roi_features = ops.roi_pool(features, [rois_idxs], output_size=(7, 7))
-        # roi_features = ops.roi_align(features, [rois_idxs], output_size=(7, 7))
+        # roi_features = ops.roi_pool(features, [rois_idxs], output_size=self.backbone.roi_pool_size)
+        roi_features = ops.roi_align(features, [rois_idxs], output_size=self.backbone.roi_pool_size)
         roi_features = roi_features.view(*self.backbone.classifier_in_shape)
         roi_features = self.backbone.classifier(roi_features)
         roi_features = roi_features.reshape(1, -1, self.backbone.out_features)
         if self.global_context:
             tensor = torch.tensor([[0., 0., grid_size[1], grid_size[0]]], device=self.device)
-            global_context = ops.roi_pool(features, [tensor], output_size=(7, 7))
+            global_context = ops.roi_pool(features, [tensor], output_size=self.backbone.roi_pool_size)
+            # global_context = ops.roi_align(features, [tensor], output_size=self.backbone.roi_pool_size)
             global_context = global_context.view(*self.backbone.classifier_in_shape)
             global_context = self.backbone.classifier(global_context)
             global_context = global_context.repeat_interleave(len(rois_idxs), dim=0)
