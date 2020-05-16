@@ -14,8 +14,8 @@ NUM_WORKERS = 0
 VGG_MEAN = [0.458, 0.438, 0.405]
 VGG_STD = [0.247, 0.242, 0.248]
 
-SS_MEAN = [0.174, 0.632, 0.506]
-SS_STD = [0.111, 0.072, 0.075]
+SS_MEAN = [0.174, 0.634, 0.505]
+SS_STD = [0.105, 0.068, 0.071]
 
 
 def read_classes(file):
@@ -105,10 +105,13 @@ def to_numpy_image(image, size, normalize=True):
     image : ndarray
         A Numpy array representation of the image.
     """
-    image = np.array(image.permute(1, 2, 0).cpu().numpy())
+    if isinstance(image, torch.Tensor):
+        image = np.array(image.permute(1, 2, 0).cpu().numpy())
     if normalize:
-        image *= VGG_STD
-        image += VGG_MEAN
+        # image *= VGG_STD
+        # image += VGG_MEAN
+        image *= SS_STD
+        image += SS_MEAN
     image *= 255.
     image = image.astype(dtype=np.uint8)
     image = cv2.resize(image, dsize=size, interpolation=cv2.INTER_CUBIC)
@@ -116,7 +119,7 @@ def to_numpy_image(image, size, normalize=True):
     return image
 
 
-def add_bbox_to_image(image, bbox, confidence, cls):
+def add_bbox_to_image(image, bbox, confidence, cls, color=None):
     """
     Adds a visual bounding box with labels to an image in-place.
 
@@ -136,10 +139,14 @@ def add_bbox_to_image(image, bbox, confidence, cls):
         The class to which the object in the bounding box belongs. This
         value will be displayed as part of the label.
     """
-    text = '{} {:.2f}'.format(cls, confidence)
+    if confidence is not None:
+        text = '{} {:.2f}'.format(cls, confidence)
+    else:
+        text = '{}'.format(cls)
     xmin, ymin, xmax, ymax = bbox
     # Draw a bounding box.
-    color = np.random.uniform(0., 255., size=3)
+    if color is None:
+        color = np.random.uniform(0., 255., size=3)
     cv2.rectangle(image, (xmin, ymax), (xmax, ymin), color, 3)
 
     # Display the label at the top of the bounding box
@@ -495,3 +502,86 @@ def step_decay_scheduler(optimizer, steps=None, scales=None):
     scheduler = torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda=foo)
 
     return scheduler
+
+
+def find_best_anchors(classes, root_dir, dataset, min_size=600, k=5, max_iter=20, skip_truncated=True, weighted=True, init=600, device='cuda'):
+
+    annotations_dir = [os.path.join(r, 'Annotations') for r in root_dir]
+    sets_dir = [os.path.join(r, 'ImageSets', 'Main') for r in root_dir]
+
+    images = []
+
+    for d in range(len(dataset)):
+        for cls in classes:
+            file = os.path.join(sets_dir[d], '{}_{}.txt'.format(cls, dataset[d]))
+            with open(file) as f:
+                for line in f:
+                    image_desc = line.split()
+                    if image_desc[1] == '1':
+                        images.append((d, image_desc[0]))
+
+    images = list(set(images))
+    bboxes = []
+
+    for image in images:
+        annotations = get_annotations(annotations_dir[image[0]], image[1])
+        for annotation in annotations:
+            name, height, width, xmin, ymin, xmax, ymax, truncated, difficult = annotation
+            if skip_truncated and truncated:
+                continue
+            scale = min_size * 1.0 / min(width, height)
+            width = (xmax - xmin) * scale
+            height = (ymax - ymin) * scale
+            bboxes.append([0., 0., width, height])
+
+    bboxes = torch.tensor(bboxes, device=device)
+    anchors = torch.tensor(([0., 0., init, init] * np.random.random((k, 4))).astype(dtype=np.float32), device=device)
+
+    for _ in range(max_iter):
+        ious = jaccard(bboxes, anchors)
+        iou_max, idx = torch.max(ious, dim=1)
+        for i in range(k):
+            if weighted:
+                weights = (torch.tensor([1.], device=device) - iou_max[idx == i, None]) ** 2
+                anchors[i] = torch.sum(bboxes[idx == i] * weights, dim=0) / torch.sum(weights)  # Weighted k-means
+
+            else:
+                anchors[i] = torch.mean(bboxes[idx == i], dim=0)  # Normal k-means
+
+        sort = torch.argsort(anchors[:, 2], dim=0)
+        anchors = anchors[sort]
+
+    return anchors[:, 2:]
+
+
+def main():
+    device = 'cuda' if torch.cuda.is_available() else 'cpu'
+
+    # classes = read_classes('../../../Data/VOCdevkit/voc.names')
+    # a = find_best_anchors(classes,
+    #                       k=9,
+    #                       max_iter=1000,
+    #                       root_dir=['../../../Data/VOCdevkit/VOC2007/', '../../../Data/VOCdevkit/VOC2012/'],
+    #                       dataset=['trainval'] * 2,
+    #                       min_size=600,
+    #                       skip_truncated=False,
+    #                       weighted=True,
+    #                       device=device)
+    classes = read_classes('../../../Data/SS/ss.names')
+    a = find_best_anchors(classes,
+                          k=9,
+                          max_iter=1000,
+                          root_dir=['../../../Data/SS/'],
+                          dataset=['train'],
+                          init=50,
+                          min_size=600,
+                          skip_truncated=False,
+                          weighted=True,
+                          device=device)
+
+    for x, y in a:
+        print('[{:.0f},{:.0f}], '.format(x, y))
+
+
+if __name__ == '__main__':
+    main()

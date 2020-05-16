@@ -31,7 +31,7 @@ def parse_rec(filename):
     for obj in tree.findall("object"):
         obj_struct = {}
         obj_struct["name"] = obj.find("name").text
-        obj_struct["pose"] = obj.find("pose").text
+        # obj_struct["pose"] = obj.find("pose").text
         obj_struct["truncated"] = int(obj.find("truncated").text)
         obj_struct["difficult"] = int(obj.find("difficult").text)
         bbox = obj.find("bndbox")
@@ -196,12 +196,15 @@ if __name__ == '__main__':
     cls = ['aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat',
            'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike', 'person',
            'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor']
+    cls = ['FM', 'GMSK', 'LFM']
     mean_ap = []
     for cl in cls:
         rec, prec, ap = voc_eval(#detpath='./comp4_det_test_{}.txt',
                                  detpath='./FasterRCNN_det_test_{}.txt',
-                                 annopath='../../../../Data/VOCdevkit/VOC2007/Annotations/{}.xml',
-                                 imagesetfile='../../../../Data/VOCdevkit/VOC2007/ImageSets/Main/test.txt',
+                                 # annopath='../../../../Data/VOCdevkit/VOC2007/Annotations/{}.xml',
+                                 # imagesetfile='../../../../Data/VOCdevkit/VOC2007/ImageSets/Main/test.txt',
+                                 annopath='../../../../Data/SS/Annotations/{}.xml',
+                                 imagesetfile='../../../../Data/SS/ImageSets/Main/test.txt',
                                  classname=cl,
                                  ovthresh=0.5,
                                  use_07_metric=False)

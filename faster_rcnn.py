@@ -21,16 +21,27 @@ def main():
     VGG = VGGBackbone(model=models.vgg16,
                       model_path='models/vgg16-397923af.pth',
                       device=device)
+    VGG.set_input_dims(2)
     ResNet = ResNetBackbone(model=models.resnet101,
                             model_path='models/resnet101-5d3b4d8f.pth',
                             device=device)
-    ResNet = ResNetBackbone()
+    ResNet.set_input_dims(2)
 
     faster_rcnn = FasterRCNN(name='FasterRCNN',
-                             anchors=[  # [45, 90], [64, 64], [90, 45],
-                                 [90, 180], [128, 128], [180, 90],
-                                 [180, 360], [256, 256], [360, 180],
-                                 [360, 720], [512, 512], [720, 360]],
+                             anchors=[[5, 29],
+                                      [22, 31],
+                                      [61, 41],
+                                      [73, 12],
+                                      [122, 42],
+                                      [169, 15],
+                                      [245, 43],
+                                      [589, 10],
+                                      [593, 47]],
+                             # [[45, 90], [64, 64], [90, 45],
+                             # [90, 180], [128, 128], [180, 90],
+                             # [180, 360], [256, 256], [360, 180],
+                             # [360, 720], [512, 512], [720, 360]],
+                             num_classes=3,
                              backbone=ResNet,
                              use_global_ctx=True,
                              device=device)
@@ -53,38 +64,52 @@ def main():
 
     faster_rcnn.to(device)
 
-    train_data = PascalDatasetImage(root_dir=['../../../Data/VOCdevkit/VOC2007/'],
-                                    #          '../../../Data/VOCdevkit/VOC2012/'],
-                                    classes='../../../Data/VOCdevkit/voc.names',
-                                    # dataset=['trainval', 'trainval'],
-                                    dataset=['test'],
-                                    skip_difficult=False,
-                                    skip_truncated=False,
-                                    train=True,
-                                    mu=[0.485, 0.456, 0.406],
-                                    sigma=[0.229, 0.224, 0.225],
-                                    do_transforms=True,
-                                    return_targets=True
-                                    )
+    train_data = PascalDatasetImage(  # root_dir=['../../../Data/VOCdevkit/VOC2007/'],
+        #          '../../../Data/VOCdevkit/VOC2012/'],
+        root_dir='../../../Data/SS/',
+        # classes='../../../Data/VOCdevkit/voc.names',
+        classes='../../../Data/SS/ss.names',
+        # dataset=['trainval', 'trainval'],
+        dataset=['train'],
+        skip_difficult=False,
+        skip_truncated=False,
+        train=True,
+        # mu=[0.485, 0.456, 0.406],
+        mu=[0.485, 0.456, 0.406],
+        # sigma=[0.229, 0.224, 0.225],
+        sigma=[0.229, 0.224, 0.225],
+        do_transforms=True,
+        return_targets=True
+    )
 
-    # val_data = PascalDatasetImage(root_dir='../../../Data/VOCdevkit/VOC2012/',
-    #                               classes='../../../Data/VOCdevkit/voc.names',
-    #                               dataset='val',
-    #                               skip_truncated=False,
-    #                               mu=[0.485, 0.456, 0.406],
-    #                               sigma=[0.229, 0.224, 0.225],
-    #                               do_transforms=False,
-    #                               )
+    val_data = PascalDatasetImage(  # root_dir='../../../Data/VOCdevkit/VOC2012/',
+        root_dir='../../../Data/SS/',
+        # classes='../../../Data/VOCdevkit/voc.names',
+        classes='../../../Data/SS/ss.names',
+        # dataset='val',
+        dataset='test',
+        skip_truncated=False,
+        # mu=[0.485, 0.456, 0.406],
+        mu=[0.485, 0.456, 0.406],
+        # sigma=[0.229, 0.224, 0.225],
+        sigma=[0.229, 0.224, 0.225],
+        do_transforms=False,
+    )
 
-    test_data = PascalDatasetImage(root_dir='../../../Data/VOCdevkit/VOC2007/',
-                                   classes='../../../Data/VOCdevkit/voc.names',
-                                   dataset='test',
-                                   skip_truncated=False,
-                                   mu=[0.485, 0.456, 0.406],
-                                   sigma=[0.229, 0.224, 0.225],
-                                   do_transforms=False,
-                                   return_targets=False
-                                   )
+    test_data = PascalDatasetImage(  # root_dir='../../../Data/VOCdevkit/VOC2007/',
+        root_dir='../../../Data/SS/',
+        # classes='../../../Data/VOCdevkit/voc.names',
+        classes='../../../Data/SS/ss.names',
+        # dataset='test',
+        dataset='test',
+        skip_truncated=False,
+        # mu=[0.485, 0.456, 0.406],
+        mu=[0.174, 0.634, 0.505],
+        # sigma=[0.229, 0.224, 0.225],
+        sigma=[0.105, 0.068, 0.071],
+        do_transforms=False,
+        return_targets=False
+    )
 
     # faster_rcnn = pickle.load(open('models/FasterRCNNbest.pkl', 'rb'))
 
@@ -132,7 +157,7 @@ def main():
         torch.random.manual_seed(12345)
         np.random.seed(12345)
 
-        faster_rcnn = pickle.load(open('models/FasterRCNN18.pkl', 'rb'))
+        faster_rcnn = pickle.load(open('models/FasterRCNN18_ss.pkl', 'rb'))
         # faster_rcnn.fast_rcnn.backbone.channels = 512
 
         # faster_rcnn.rpn.predict(backbone=faster_rcnn.fast_rcnn.backbone,
@@ -143,7 +168,7 @@ def main():
         #                         export=False)
 
         faster_rcnn.predict(dataset=test_data,
-                            confidence_threshold=0.001,
+                            confidence_threshold=0.01,
                             overlap_threshold=.3,
                             show=False,
                             export=True
