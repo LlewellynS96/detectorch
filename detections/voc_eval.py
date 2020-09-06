@@ -8,6 +8,11 @@ import tempfile
 import xml.etree.ElementTree as ET
 from collections import OrderedDict, defaultdict
 from functools import lru_cache
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.rcParams['mathtext.fontset'] = 'stix'
+matplotlib.rcParams['font.family'] = 'STIXGeneral'
+matplotlib.rcParams.update({'font.size': 13})
 
 ##############################################################################
 #
@@ -117,8 +122,8 @@ def voc_eval(detpath, annopath, imagesetfile, classname, ovthresh=0.5, use_07_me
     for imagename in imagenames:
         R = [obj for obj in recs[imagename] if obj["name"] == classname]
         bbox = np.array([x["bbox"] for x in R])
-        difficult = np.array([x["difficult"] for x in R]).astype(np.bool)
-        # difficult = np.array([False for x in R]).astype(np.bool)  # treat all "difficult" as GT
+        # difficult = np.array([x["difficult"] for x in R]).astype(np.bool)
+        difficult = np.array([False for x in R]).astype(np.bool)  # treat all "difficult" as GT
         det = [False] * len(R)
         npos = npos + sum(~difficult)
         class_recs[imagename] = {"bbox": bbox, "difficult": difficult, "det": det}
@@ -196,9 +201,11 @@ if __name__ == '__main__':
     cls = ['aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 'bus', 'car', 'cat',
            'chair', 'cow', 'diningtable', 'dog', 'horse', 'motorbike', 'person',
            'pottedplant', 'sheep', 'sofa', 'train', 'tvmonitor']
+    # cls = ['PSK2', 'PSK4', 'PSK8']
     cls = ['FM', 'GMSK', 'LFM']
     mean_ap = []
-    for cl in cls:
+    markers = ['o', 'x', 'v']
+    for i, cl in enumerate(cls):
         rec, prec, ap = voc_eval(#detpath='./comp4_det_test_{}.txt',
                                  detpath='./FasterRCNN_det_test_{}.txt',
                                  # annopath='../../../../Data/VOCdevkit/VOC2007/Annotations/{}.xml',
@@ -210,10 +217,21 @@ if __name__ == '__main__':
                                  use_07_metric=False)
         mean_ap.append(ap)
         print(ap)
-        # plt.plot(rec, prec)
-        # plt.xlabel('Recall')
-        # plt.ylabel('Precision')
-        # plt.xlim(0., 1.)
-        # plt.ylim(0., 1.)
-        # plt.show()
+        mark = np.searchsorted(rec, np.linspace(0., 1., 21))
+        mark[0] = 1
+        plt.plot(rec[mark - 1], prec[mark - 1], marker=markers[i], label=cl)
+        plt.xlabel('Recall')
+        plt.ylabel('Precision')
+        plt.xlim(0., 1.)
+        plt.ylim(0., 1.)
+    plt.legend()
+    plt.grid(which='major')
+    plt.minorticks_on()
+    plt.grid(b=True, which='minor', color='#999999', linestyle='-', alpha=0.2)
+    plt.axes().set_aspect(0.5)
+    plt.savefig('frcn_pr.pdf',
+                dpi=300,
+                bbox_inches='tight',
+                pad_inches=0)
+
     print(np.mean(mean_ap))

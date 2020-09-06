@@ -7,9 +7,10 @@ import torch
 import csv
 from functools import reduce
 from time import time
+from matplotlib import cm
 
 
-NUM_WORKERS = 0
+NUM_WORKERS = 8
 
 VGG_MEAN = [0.458, 0.438, 0.405]
 VGG_STD = [0.247, 0.242, 0.248]
@@ -86,7 +87,7 @@ def get_annotations(annotations_dir, img):
     return annotations
 
 
-def to_numpy_image(image, size, normalize=True):
+def to_numpy_image(image, size, mu=0., sigma=1., normalised=True):
     """
     Converts a Tensor in the range [0., 1.] to a resized
     Numpy array in the range [0, 255].
@@ -105,13 +106,17 @@ def to_numpy_image(image, size, normalize=True):
     image : ndarray
         A Numpy array representation of the image.
     """
+    if image.ndim == 2:
+        image = image[None]
     if isinstance(image, torch.Tensor):
         image = np.array(image.permute(1, 2, 0).cpu().numpy())
-    if normalize:
-        # image *= VGG_STD
-        # image += VGG_MEAN
-        image *= SS_STD
-        image += SS_MEAN
+    image *= np.array(sigma)
+    image += np.array(mu)
+    if not normalised:
+        image -= np.min(image)
+        image /= np.max(image)
+    if image.shape[2] == 1:
+        image = cm.get_cmap('viridis')(image)[:, :, 0, :3]
     image *= 255.
     image = image.astype(dtype=np.uint8)
     image = cv2.resize(image, dsize=size, interpolation=cv2.INTER_CUBIC)
@@ -119,7 +124,7 @@ def to_numpy_image(image, size, normalize=True):
     return image
 
 
-def add_bbox_to_image(image, bbox, confidence, cls, color=None):
+def add_bbox_to_image(image, bbox, confidence, cls, thickness=3, color=None):
     """
     Adds a visual bounding box with labels to an image in-place.
 
@@ -147,18 +152,18 @@ def add_bbox_to_image(image, bbox, confidence, cls, color=None):
     # Draw a bounding box.
     if color is None:
         color = np.random.uniform(0., 255., size=3)
-    cv2.rectangle(image, (xmin, ymax), (xmax, ymin), color, 3)
+    cv2.rectangle(image, (xmin, ymax), (xmax, ymin), color, thickness)
 
     # Display the label at the top of the bounding box
     label_size, base_line = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, 0.5, 1)
     ymax = max(ymax, label_size[1])
     cv2.rectangle(image,
-                  (xmin, ymax - round(1.5 * label_size[1])),
+                  (xmin, ymax),
                   (xmin + round(1.5 * label_size[0]),
-                   ymax + base_line),
+                   ymax + base_line + round(1.5 * label_size[1])),
                   color,
                   cv2.FILLED)
-    cv2.putText(image, text, (xmin, ymax), cv2.FONT_HERSHEY_SIMPLEX, 0.75, [255] * 3, 1)
+    cv2.putText(image, text, (xmin, ymax + round(1.5 * label_size[1])), cv2.FONT_HERSHEY_SIMPLEX, 0.75, [255] * 3, 1)
 
 
 def jaccard(boxes_a, boxes_b):
@@ -574,7 +579,7 @@ def main():
                           root_dir=['../../../Data/SS/'],
                           dataset=['train'],
                           init=50,
-                          min_size=600,
+                          min_size=512,
                           skip_truncated=False,
                           weighted=True,
                           device=device)

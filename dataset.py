@@ -10,7 +10,7 @@ from utils import read_classes, get_annotations
 from PIL import Image, ImageFilter
 import matplotlib.pyplot as plt
 
-RESIZE = True
+RESIZE = False
 # MIN_TRAIN_SIZE = [480, 512, 544, 576, 608, 640, 672, 704, 736, 768, 800]
 # MIN_TEST_SIZE = 800
 # MAX_SIZE = 1333
@@ -20,7 +20,7 @@ MAX_SIZE = 1000
 SMALL_THRESHOLD = 0.005
 
 
-class PascalDatasetImage(Dataset):
+class PascalDataset(Dataset):
     """
     This object can be configured to return images and annotations
     from a PASCAL VOC dataset in a general format that is compatible with
@@ -92,6 +92,7 @@ class PascalDatasetImage(Dataset):
         self.images = list(set(self.images))  # Remove duplicates.
         self.images.sort()
         # random.shuffle(self.images)
+        self.n = len(self.images)
 
     def __getitem__(self, index):
         """
@@ -183,7 +184,7 @@ class PascalDatasetImage(Dataset):
 
     def __len__(self):
 
-        return len(self.images)
+        return self.n
 
     def encode_categorical(self, name):
         y = self.classes.index(name)
@@ -196,7 +197,7 @@ class PascalDatasetImage(Dataset):
         return self.classes[idx]
 
 
-class SSDatasetSTFT(Dataset):
+class SSDataset(Dataset):
 
     def __init__(self, classes, mu, sigma, root_dir, dataset, train=False, skip_truncated=True,
                  do_transforms=False, skip_difficult=True, return_targets=False, mode='spectrogram_db'):
@@ -242,9 +243,11 @@ class SSDatasetSTFT(Dataset):
                         if image_desc[1] == '1':
                             self.data.append((d, image_desc[0]))
 
-        self.data = list(set(self.stfts))  # Remove duplicates.
+        self.data = list(set(self.data))  # Remove duplicates.
         self.data.sort()
         # random.shuffle(self.data)
+
+        self.n = len(self.data)
 
     def __getitem__(self, index):
         """
@@ -282,16 +285,24 @@ class SSDatasetSTFT(Dataset):
             data = np.abs(stft) ** 2
         elif self.mode == 'spectrogram_db':
             data = 10. * np.log10(np.abs(stft) ** 2)
+        elif self.mode == 'spectrogram_ap':
+            data = [np.abs(stft) ** 2, np.angle(stft)]
+        elif self.mode == 'spectrogram_ap_db':
+            data = [10. * np.log10(np.abs(stft) ** 2), np.angle(stft)]
         elif self.mode == 'stft_iq':
             data = [stft.real, stft.imag]
         elif self.mode == 'stft_ap':
             data = [np.abs(stft), np.angle(stft)]
         else:
-            raise ValueError('Unknown mode. Use one of spectrogram, spectrogram_db, stft_iq, or stft_ap.')
+            raise ValueError('Unknown mode. Use one of spectrogram, spectrogram_db, '
+                             'spectrogram_ap, spectrogram_ap_db, stft_iq or stft_ap.')
 
         data = torch.tensor(data, dtype=torch.float32)
+        if data.ndim == 2:
+            data = data[None]
+        data = (data - torch.tensor(self.mu)[:, None, None]) / torch.tensor(self.sigma)[:, None, None]
 
-        data_info = {'id': img, 'width': data.shape[1], 'height': data.shape[0], 'dataset': self.dataset[dataset]}
+        data_info = {'id': img, 'width': data.shape[2], 'height': data.shape[1], 'dataset': self.dataset[dataset]}
 
         if self.return_targets:
             annotations = get_annotations(self.annotations_dir[dataset], data_info['id'])
@@ -327,7 +338,7 @@ class SSDatasetSTFT(Dataset):
 
     def __len__(self):
 
-        return len(self.data)
+        return self.n
 
     def encode_categorical(self, name):
         y = self.classes.index(name)
@@ -358,12 +369,12 @@ class SSDatasetSTFT(Dataset):
 if __name__ == '__main__':
     from torch.utils.data import DataLoader
 
-    db = SSDatasetSTFT(classes='../../../Data/SS/ss.names',
+    db = SSDataset(classes='../../../Data/SS/ss.names',
                        root_dir='../../../Data/SS/',
                        dataset='train',
                        mode='stft_iq',
-                       mu=[0., 0., 0.],
-                       sigma=[1., 1., 1.])
+                       mu=[0., 0.],
+                       sigma=[1., 1.])
 
     # db = PascalDatasetImage(classes='../../../Data/VOCdevkit/voc.names',
     #                         root_dir='../../../Data/VOCdevkit/VOC2007/',

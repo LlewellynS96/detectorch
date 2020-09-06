@@ -1,4 +1,5 @@
 import os
+import pickle
 import numpy as np
 from PIL import Image
 import cv2
@@ -6,8 +7,11 @@ import matplotlib.pyplot as plt
 from utils import to_numpy_image, add_bbox_to_image, get_annotations, read_classes
 import torch
 import torchvision.transforms
+from detectron import FasterRCNN
+from dataset import *
 from tqdm import tqdm
 import scipy.signal
+import gizeh
 
 
 class ImageDataset:
@@ -178,12 +182,17 @@ class SSDataset:
             data = np.abs(stft) ** 2
         elif self.mode == 'spectrogram_db':
             data = 10. * np.log10(np.abs(stft) ** 2)
+        elif self.mode == 'spectrogram_ap':
+            data = [np.abs(stft) ** 2, np.angle(stft)]
+        elif self.mode == 'spectrogram_ap_db':
+            data = [10. * np.log10(np.abs(stft) ** 2), np.angle(stft)]
         elif self.mode == 'stft_iq':
             data = [stft.real, stft.imag]
         elif self.mode == 'stft_ap':
             data = [np.abs(stft), np.angle(stft)]
         else:
-            raise ValueError('Unknown mode. Use one of spectrogram, spectrogram_db, stft_iq, or stft_ap.')
+            raise ValueError('Unknown mode. Use one of spectrogram, spectrogram_db, '
+                             'spectrogram_ap, spectrogram_ap_db, stft_iq or stft_ap.')
 
         data = torch.tensor(data, dtype=torch.float32)
         if data.ndim == 2:
@@ -246,6 +255,39 @@ class SSDataset:
         return specgram, f, t
 
 
+def create_pascal_label_colormap(num_classes=21):
+    """
+    Creates a label colormap used in PASCAL VOC segmentation benchmark.
+    Returns
+
+    A colormap for visualizing segmentation results.
+    """
+    def bit_get(val, idx):
+        """
+        Gets the bit value.
+        Parameters
+        ----------
+        val: int or numpy int array
+            Input value.
+        idx:
+            Which bit of the input val.
+        Returns
+        -------
+        The "idx"-th bit of input val.
+        """
+        return (val >> idx) & 1
+
+    colormap = np.zeros((256, 3), dtype=int)
+    ind = np.arange(256, dtype=int)
+
+    for shift in reversed(range(8)):
+        for channel in range(3):
+            colormap[:, channel] |= bit_get(ind, channel) << shift
+        ind >>= 3
+
+    return colormap[:num_classes] / 255.
+
+
 def show_difficult():
     # dataset = ImageDataset(root_dir='../../../Data/VOCdevkit/VOC2007/',
     #                              classes='../../../Data/VOCdevkit/voc.names',
@@ -257,7 +299,7 @@ def show_difficult():
                           )
 
     for image, image_info, (bboxes, classes) in dataset:
-        image = to_numpy_image(image, size=(image_info['width'], image_info['height']), normalize=False)
+        image = to_numpy_image(image, size=(image_info['width'], image_info['height']))
         for bbox, cls, difficult, truncated in zip(bboxes, classes, image_info['difficult'], image_info['truncated']):
             name = dataset.classes[cls]
             xmin, ymin, xmax, ymax = bbox
@@ -275,19 +317,43 @@ def show_difficult():
         plt.show()
 
 
-def calculate_mu_sigma():
-    # dataset = DefaultImageDataset(root_dir=['../../../Data/VOCdevkit/VOC2007/',
-    #                                         '../../../Data/VOCdevkit/VOC2012/'],
-    #                               classes='../../../Data/VOCdevkit/voc.names',
-    #                               dataset=['trainval'] * 2
+def show_gt():
+    # dataset = ImageDataset(root_dir='../../../Data/VOCdevkit/VOC2007/',
+    #                              classes='../../../Data/VOCdevkit/voc.names',
+    #                              dataset='test'
+    #                              )
+    dataset =ImageDataset(root_dir='../../../Data/AMC/',
+                          classes='../../../Data/AMC/amc.names',
+                          dataset='train'
+                          )
+
+    for image, image_info, (bboxes, classes) in dataset:
+        image = to_numpy_image(image, size=(image_info['width'], image_info['height']))
+        for bbox, cls, difficult, truncated in zip(bboxes, classes, image_info['difficult'], image_info['truncated']):
+            name = dataset.classes[cls]
+            xmin, ymin, xmax, ymax = bbox
+            xmin *= image_info['width']
+            ymin *= image_info['height']
+            xmax *= image_info['width']
+            ymax *= image_info['height']
+            bbox = [int(xmin), int(ymin), int(xmax), int(ymax)]
+            add_bbox_to_image(image, bbox, None, name, 2, [0., 255., 0])
+        plt.imshow(image)
+        plt.axis('off')
+        plt.show()
+
+
+def calculate_mu_sigma(root_dir, classes, dataset, ndims):
+    # dataset = DefaultImageDataset(root_dir=root_dir,
+    #                               classes=classes,
+    #                               dataset=dataset
     #                               )
-    dataset = SSDataset(root_dir='../../../Data/SS/',
-                        classes='../../../Data/SS/ss.names',
-                        dataset='test',
-                        mode='stft_iq'
+    dataset = SSDataset(root_dir=root_dir,
+                        classes=classes,
+                        dataset=dataset,
+                        mode='stft_ap'
                         )
 
-    ndims = 2
     mu = torch.zeros(len(dataset), ndims)
     sigma = torch.zeros(len(dataset), ndims)
     i = 0
@@ -300,9 +366,86 @@ def calculate_mu_sigma():
     return mu, sigma
 
 
+def draw_vector_bboxes(model, data, image_size=512, threshold=.8):
+    colors = create_pascal_label_colormap(data.num_classes-1)
+
+    bboxes, classes, confidence, image_idx = model.predict(dataset=data,
+                                                           confidence_threshold=threshold,
+                                                           overlap_threshold=.3,
+                                                           show=False,
+                                                           export=False
+                                                           )
+
+    for idx in np.unique(image_idx):
+        image = Image.open(os.path.join(data.root_dir[0], 'JPEGImages', idx + '.jpg'))
+        image = image.resize((image_size, image_size))
+        image = gizeh.ImagePattern(np.array(image))
+        image = gizeh.rectangle(2*image_size,
+                                2*image_size,
+                                xy=(0, 0),
+                                fill=image)
+        pdf = gizeh.PDFSurface('detections/{}.pdf'.format(idx),
+                               image_size,
+                               image_size)
+        image.draw(pdf)
+        mask = np.array(image_idx) == idx
+        _bboxes = bboxes[mask]
+        _classes = classes[mask]
+        _confidence = confidence[mask]
+        argsort_x = torch.argsort(_bboxes[:, 0])
+        argsort_y = torch.argsort(_bboxes[argsort_x][:, 1])
+        _bboxes = _bboxes[argsort_x][argsort_y]
+        _classes = _classes[argsort_x][argsort_y]
+        _confidence = _confidence[argsort_x][argsort_y]
+        for bb, cl, co in zip(_bboxes, _classes, _confidence):
+            rect = [[int(bb[0]), int(bb[1])],
+                    [int(bb[2]), int(bb[1])],
+                    [int(bb[2]), int(bb[3])],
+                    [int(bb[0]), int(bb[3])]]
+            rect = gizeh.polyline(rect, close_path=True, stroke_width=4, stroke=colors[cl-1])
+            rect.draw(pdf)
+        for bb, cl, co in zip(_bboxes, _classes, _confidence):
+            w, h = len(data.classes[cl]) * 8.5 + 65, 15
+            rect = gizeh.rectangle(w,
+                                   h,
+                                   xy=(int(bb[0] + w / 2 - 2),
+                                       int(bb[1] - h / 2 + 7)),
+                                   fill=(1, 1, 1, 0.5))
+
+            rect.draw(pdf)
+            txt = gizeh.text('{}: {:.2f}'.format(data.classes[cl], co),
+                             'monospace',
+                             fontsize=16,
+                             xy=(int(bb[0]),
+                                 int(bb[1])),  # - 12),
+                             fill=(0., 0., 0.),
+                             v_align='center',
+                             h_align='left')
+            txt.draw(pdf)
+        pdf.flush()
+        pdf.finish()
+
+
 def main():
     # show_difficult()
-    print(calculate_mu_sigma())
+    show_gt()
+    # print(calculate_mu_sigma(root_dir='../../../Data/SS/',
+    #                          classes='../../../Data/SS/ss.names',
+    #                          dataset='train',
+    #                          ndims=2))
+    data = PascalDataset(root_dir='../../../Data/SS/',
+                         classes='../../../Data/SS/ss.names',
+                         dataset='test',
+                         skip_difficult=False,
+                         skip_truncated=False,
+                         mu=[0.174, 0.634, 0.505],
+                         sigma=[0.105, 0.068, 0.071],
+                         do_transforms=False
+                         )
+    data.n = 10
+    model = pickle.load(open('FasterRCNN18.pkl', 'rb'))
+
+    draw_vector_bboxes(model, data)
 
 
 if __name__ == '__main__':

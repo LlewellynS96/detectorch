@@ -10,11 +10,14 @@ import numpy as np
 from torchvision import models, ops
 from tqdm import tqdm
 import matplotlib.pyplot as plt
+from matplotlib import cm
 from utils import jaccard, sample_ids, parameterize_bboxes, deparameterize_bboxes, access_dict_list, export_prediction
 from utils import xywh2xyxy, xyxy2xywh
 from utils import to_numpy_image, add_bbox_to_image, nullcontext
 from utils import NUM_WORKERS
-from layers import FocalLoss
+from resnet import ComplexResNet50
+from conv import ComplexToRealConv2d
+from operations import Unsqueeze
 
 
 NETWORK_STRIDE = 16
@@ -38,6 +41,7 @@ class ResNetBackbone(nn.Module):
                  model=models.resnet50,
                  model_path='models/resnet50-19c8e357.pth',
                  pretrained=True,
+                 input_dims=3,
                  device='cuda'):
         super(ResNetBackbone, self).__init__()
         self.device = device
@@ -60,15 +64,14 @@ class ResNetBackbone(nn.Module):
 
         self.channels = 1024
         self.roi_pool_size = (7, 7)
-        self.classifier_in_shape = (-1, self.channels, 7, 7)
+        self.classifier_in_shape = (-1, self.channels, *self.roi_pool_size)
         self.out_features = 2048
+
+        self.set_input_dims(input_dims)
 
         self.to(device)
 
     def mini_freeze(self):
-        """
-            Freezes the first few layers of the backbone (conv and bn) of the VGG network.
-        """
         for layer in list(self.features)[:-1]:
             for param in layer.parameters():
                 param.requires_grad = False
@@ -83,9 +86,39 @@ class ResNetBackbone(nn.Module):
     def set_input_dims(self, dims=3):
         modules = list(self.features)
         conv = modules[0]
+        assert dims <= conv.weight.data.shape[1]
         modules[0] = nn.Conv2d(dims, 64, kernel_size=7, stride=2, padding=3, bias=False)
         modules[0].weight.data.copy_(conv.weight.data[:, :dims])
         self.features = nn.Sequential(*modules)
+
+
+class ComplexResNetBackbone(nn.Module):
+    def __init__(self, device='cuda'):
+        super().__init__()
+        self.device = device
+        self.model = ComplexResNet50()
+
+        self.features = nn.Sequential(*[Unsqueeze(2),
+                                        self.model.conv1,
+                                        self.model.bn1,
+                                        self.model.relu,
+                                        self.model.maxpool,
+                                        self.model.layer1,
+                                        self.model.layer2,
+                                        self.model.layer3,
+                                        ComplexToRealConv2d(1024, 1024, kernel_size=1)
+                                        ])
+        real_resnet = models.resnet50()
+        self.classifier = nn.Sequential(*[real_resnet.layer4,
+                                          real_resnet.avgpool
+                                          ])
+
+        self.channels = 1024
+        self.roi_pool_size = (7, 7)
+        self.classifier_in_shape = (-1, self.channels, *self.roi_pool_size)
+        self.out_features = 2048
+
+        self.to(device)
 
 
 class VGGBackbone(nn.Module):
@@ -94,6 +127,7 @@ class VGGBackbone(nn.Module):
                  model_path='models/vgg16-397923af.pth',
                  pretrained=True,
                  use_dropout=False,
+                 input_dims=3,
                  device='cuda'):
         super(VGGBackbone, self).__init__()
         self.device = device
@@ -113,8 +147,10 @@ class VGGBackbone(nn.Module):
 
         self.channels = 512
         self.roi_pool_size = (7, 7)
-        self.classifier_in_shape = (1, -1, self.channels * 7 * 7)
+        self.classifier_in_shape = (1, -1, self.channels * np.product(self.roi_pool_size))
         self.out_features = 4096
+
+        self.set_input_dims(input_dims)
 
         self.to(device)
 
@@ -128,6 +164,7 @@ class VGGBackbone(nn.Module):
     def set_input_dims(self, dims=3):
         modules = list(self.features)
         conv = modules[0]
+        assert dims <= conv.weight.data.shape[1]
         modules[0] = nn.Conv2d(dims, 64, kernel_size=3)
         modules[0].weight.data.copy_(conv.weight.data[:, :dims])
         modules[0].bias.data.copy_(conv.bias.data)
@@ -522,6 +559,11 @@ class FastRCNN(nn.Module):
                 classes_tmp.append(classes[cls_mask][mask])
                 confidence_tmp.append(confidence[cls_mask][mask])
 
+            # mask = torchvision.ops.nms(bboxes, confidence, overlap_threshold)
+            # bboxes_tmp.append(bboxes[mask])
+            # classes_tmp.append(classes[mask])
+            # confidence_tmp.append(confidence[mask])
+
         if len(bboxes) > 0:
             bboxes = torch.cat(bboxes_tmp).view(-1, 4)
             bboxes[:, ::2] *= image_size[0]
@@ -868,7 +910,7 @@ class RPN(nn.Module):
                     reg, cls = self(features)
                     image_size = images.shape[-2:]
                     grid_size = features.shape[-2:]
-                    anchors_xyxy = self.rpn.construct_anchors(image_size, grid_size)
+                    anchors_xyxy = self.construct_anchors(image_size, grid_size)
                     valid = self.validate_anchors(anchors_xyxy)  # This has the effect of scrambling anchors
                     reg = reg[:, valid]
                     cls = cls[:, valid]
@@ -977,7 +1019,7 @@ class FasterRCNN(nn.Module):
 
         return bboxes, classes
 
-    def predict(self, dataset, confidence_threshold=0.1, overlap_threshold=0.5, show=True, export=True):
+    def predict(self, dataset, confidence_threshold=0.1, overlap_threshold=0.5, show=True, export=True, gt=False):
 
         self.eval()
 
@@ -991,11 +1033,14 @@ class FasterRCNN(nn.Module):
         bboxes_ = []
         confidence_ = []
         classes_ = []
-
         with torch.no_grad():
             with context as pbar:
-                # for images, images_info, (images_bboxes, images_classes) in dataloader:
-                for images, images_info in dataloader:
+                for data in dataloader:
+                    if gt:
+                        images, images_info, (images_bboxes, images_classes) = data
+                        images_bboxes = images_bboxes.to(self.device)
+                    else:
+                        images, images_info = data
                     width = images_info['width'][0].to(self.device)
                     height = images_info['height'][0].to(self.device)
                     set_name = images_info['dataset'][0]
@@ -1013,12 +1058,25 @@ class FasterRCNN(nn.Module):
                                                                   overlap_threshold=overlap_threshold)
 
                     if show:
-                        image = to_numpy_image(images[0], size=(width, height))
+                        if images[0].shape[0] == 3:
+                            image = to_numpy_image(images[0], size=(width, height), mu=dataset.mu, sigma=dataset.sigma)
+                        else:
+                            mu = dataset.mu[0]
+                            sigma = dataset.sigma[0]
+                            image = to_numpy_image(images[0][0], size=(width, height), mu=mu, sigma=sigma, normalised=False)
                         for bbox, cls, confidence in zip(bboxes, classes, confidences):
                             name = dataset.classes[cls]
-                            add_bbox_to_image(image, bbox, confidence, name)
+                            if gt:
+                                ious = jaccard(bbox[None], images_bboxes[0])
+                                max_iou, _ = torch.max(ious, dim=1)
+                                if max_iou >= 0.5:
+                                    add_bbox_to_image(image, bbox, confidence, name, 2, [0., 255., 0.])
+                                else:
+                                    add_bbox_to_image(image, bbox, confidence, name, 2, [0., 255., 0.])
+                            else:
+                                add_bbox_to_image(image, bbox, confidence, name)
                         plt.imshow(image)
-                        # plt.axis('off')
+                        plt.axis('off')
                         plt.show()
 
                     if export:
