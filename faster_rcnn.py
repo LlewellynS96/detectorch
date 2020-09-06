@@ -3,7 +3,7 @@ import torch.optim as optim
 import numpy as np
 import pickle
 import matplotlib.pyplot as plt
-from detectron import FastRCNN, FasterRCNN, RPN, VGGBackbone, ResNetBackbone, ComplexResNetBackbone
+from detectron import FastRCNN, FasterRCNN, RPN, VGGBackbone, ResNetBackbone
 from dataset import PascalDataset, SSDataset
 from torchvision import models
 from utils import step_decay_scheduler, to_numpy_image, add_bbox_to_image, get_trainable_parameters, jaccard, set_random_seed
@@ -28,8 +28,6 @@ def main():
                             pretrained=True,
                             input_dims=2,
                             device=device)
-
-    # ResNet = ComplexResNetBackbone(device=device)
 
     #faster_rcnn = FasterRCNN(name='FasterRCNN',
     #                         #anchors=[[37,44], 

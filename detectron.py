@@ -15,9 +15,6 @@ from utils import jaccard, sample_ids, parameterize_bboxes, deparameterize_bboxe
 from utils import xywh2xyxy, xyxy2xywh
 from utils import to_numpy_image, add_bbox_to_image, nullcontext
 from utils import NUM_WORKERS
-from resnet import ComplexResNet50
-from conv import ComplexToRealConv2d
-from operations import Unsqueeze
 
 
 NETWORK_STRIDE = 16
@@ -90,35 +87,6 @@ class ResNetBackbone(nn.Module):
         modules[0] = nn.Conv2d(dims, 64, kernel_size=7, stride=2, padding=3, bias=False)
         modules[0].weight.data.copy_(conv.weight.data[:, :dims])
         self.features = nn.Sequential(*modules)
-
-
-class ComplexResNetBackbone(nn.Module):
-    def __init__(self, device='cuda'):
-        super().__init__()
-        self.device = device
-        self.model = ComplexResNet50()
-
-        self.features = nn.Sequential(*[Unsqueeze(2),
-                                        self.model.conv1,
-                                        self.model.bn1,
-                                        self.model.relu,
-                                        self.model.maxpool,
-                                        self.model.layer1,
-                                        self.model.layer2,
-                                        self.model.layer3,
-                                        ComplexToRealConv2d(1024, 1024, kernel_size=1)
-                                        ])
-        real_resnet = models.resnet50()
-        self.classifier = nn.Sequential(*[real_resnet.layer4,
-                                          real_resnet.avgpool
-                                          ])
-
-        self.channels = 1024
-        self.roi_pool_size = (7, 7)
-        self.classifier_in_shape = (-1, self.channels, *self.roi_pool_size)
-        self.out_features = 2048
-
-        self.to(device)
 
 
 class VGGBackbone(nn.Module):
