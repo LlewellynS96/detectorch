@@ -10,7 +10,7 @@ from time import time
 from matplotlib import cm
 
 
-NUM_WORKERS = 8
+NUM_WORKERS = 0
 
 VGG_MEAN = [0.458, 0.438, 0.405]
 VGG_STD = [0.247, 0.242, 0.248]

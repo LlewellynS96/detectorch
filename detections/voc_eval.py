@@ -205,6 +205,7 @@ if __name__ == '__main__':
     cls = ['FM', 'GMSK', 'LFM']
     mean_ap = []
     markers = ['o', 'x', 'v']
+    linetype = ['-', '-.', '--']
     for i, cl in enumerate(cls):
         rec, prec, ap = voc_eval(#detpath='./comp4_det_test_{}.txt',
                                  detpath='./FasterRCNN_det_test_{}.txt',
@@ -217,9 +218,13 @@ if __name__ == '__main__':
                                  use_07_metric=False)
         mean_ap.append(ap)
         print(ap)
+        m = 50
+        rec = np.convolve(rec, np.ones(m) / m, 'valid')
+        prec = np.convolve(prec, np.ones(m) / m, 'valid')
         mark = np.searchsorted(rec, np.linspace(0., 1., 21))
         mark[0] = 1
-        plt.plot(rec[mark - 1], prec[mark - 1], marker=markers[i], label=cl)
+        # plt.plot(rec[mark - 1], prec[mark - 1], marker=markers[i], label=cl)
+        plt.plot(rec, prec, linestyle=linetype[i], label=cl)
         plt.xlabel('Recall')
         plt.ylabel('Precision')
         plt.xlim(0., 1.)

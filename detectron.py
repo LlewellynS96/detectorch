@@ -10,9 +10,8 @@ import numpy as np
 from torchvision import models, ops
 from tqdm import tqdm
 import matplotlib.pyplot as plt
-from matplotlib import cm
 from utils import jaccard, sample_ids, parameterize_bboxes, deparameterize_bboxes, access_dict_list, export_prediction
-from utils import xywh2xyxy, xyxy2xywh
+from utils import xyxy2xywh
 from utils import to_numpy_image, add_bbox_to_image, nullcontext
 from utils import NUM_WORKERS
 
@@ -289,7 +288,6 @@ class FastRCNN(nn.Module):
                                ' Avg P|Noobj: {:.3f}'.format(np.average(stats['avg_frcn_background'], weights=weights))
                     inner.set_postfix_str(disp_str)
                     if (inner.n + 1) % image_batch_size == 0:
-                        # torch.nn.utils.clip_grad_norm_(self.parameters(), max_norm=10., norm_type='inf')  # ???
                         optimizer.step()
                         if scheduler is not None:
                             scheduler.step()
@@ -498,7 +496,7 @@ class FastRCNN(nn.Module):
     def process_bboxes(self, bboxes, classes, image_size, confidence_threshold=0.01, overlap_threshold=0.6, nms=True):
         if classes.numel() == 0:
             return torch.tensor([], device=self.device), \
-                   torch.tensor([], device=self.device), \
+                   torch.tensor([], dtype=torch.int64, device=self.device), \
                    torch.tensor([], device=self.device)
 
         confidence, classes = torch.max(classes, dim=-1)
@@ -507,7 +505,7 @@ class FastRCNN(nn.Module):
 
         if sum(mask) == 0:
             return torch.tensor([], device=self.device), \
-                   torch.tensor([], device=self.device), \
+                   torch.tensor([], dtype=torch.int64, device=self.device), \
                    torch.tensor([], device=self.device)
 
         bboxes = bboxes[mask]
@@ -542,7 +540,7 @@ class FastRCNN(nn.Module):
             return bboxes, classes, confidence
         else:
             return torch.tensor([], device=self.device), \
-                   torch.tensor([], device=self.device), \
+                   torch.tensor([], dtype=torch.int64, device=self.device), \
                    torch.tensor([], device=self.device)
 
     def mini_freeze(self):
